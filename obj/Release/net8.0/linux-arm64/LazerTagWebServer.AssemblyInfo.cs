@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("LazerTagWebServer")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+9362bcdeac78ca277479c11c728af1e942a0f4bc")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+59dccbbde13858956dfd69493b04ced3e0d9c125")]
 [assembly: System.Reflection.AssemblyProductAttribute("LazerTagWebServer")]
 [assembly: System.Reflection.AssemblyTitleAttribute("LazerTagWebServer")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
