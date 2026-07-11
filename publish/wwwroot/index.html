@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="theme-color" content="#0d1119">
+<title>Lazer Tag Control</title>
+<link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+
+<div id="app-header">
+  <header id="topbar">
+    <div class="brand" aria-label="Lazer Tag Control">
+      <span class="brand-mark" aria-hidden="true">⚡</span>
+      <span id="title-text">LAZER TAG</span>
+    </div>
+    <div id="phase-pill" class="phase-pill phase-idle" aria-live="polite">IDLE</div>
+    <div id="relay-badge" class="relay-badge relay-offline" aria-live="polite">
+      <span class="relay-dot-sm" aria-hidden="true"></span>
+      <span id="relay-badge-text">Connecting…</span>
+    </div>
+  </header>
+
+  <nav id="action-bar" aria-label="Game controls">
+    <button type="button" id="btn-start" class="action-btn action-green" onclick="startHosting()">
+      <span class="action-icon" aria-hidden="true">▶</span><span>Start Hosting</span>
+    </button>
+    <button type="button" id="btn-countdown" class="action-btn action-blue" onclick="startCountdown()">
+      <span class="action-icon" aria-hidden="true">⏱</span><span>Countdown</span>
+    </button>
+    <button type="button" id="btn-end" class="action-btn action-red" onclick="endGame()">
+      <span class="action-icon" aria-hidden="true">■</span><span>End Game</span>
+    </button>
+    <button type="button" id="btn-next" class="action-btn action-muted" onclick="nextStep()">
+      <span class="action-icon" aria-hidden="true">↻</span><span>New Game</span>
+    </button>
+  </nav>
+</div>
+
+<main id="main-layout">
+  <aside id="setup-panel" aria-label="Game setup">
+
+    <section class="card">
+      <div class="section-header">
+        <div>
+          <h2>Presets</h2>
+          <p class="section-subtitle">Reuse a saved game setup.</p>
+        </div>
+        <button type="button" class="pill-btn" onclick="savePreset()">＋ Save</button>
+      </div>
+      <div id="preset-list" class="preset-list">
+        <span class="muted-hint">No presets saved yet.</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-heading">
+        <h2>Game Type</h2>
+        <p class="section-subtitle">Choose the rules used by every tagger.</p>
+      </div>
+      <label class="sr-only" for="game-type-select">Game type</label>
+      <select id="game-type-select" class="full-select" onchange="onGameTypeChange()"></select>
+    </section>
+
+    <section class="card">
+      <div class="section-heading">
+        <h2>Game Settings</h2>
+        <p class="section-subtitle">Global values apply unless a player override is entered.</p>
+      </div>
+      <div class="settings-grid">
+        <div class="setting-item">
+          <label for="minutes">Minutes</label>
+          <input type="number" id="minutes" min="1" max="255" value="10" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="countdown">Countdown <span class="muted-label">sec</span></label>
+          <input type="number" id="countdown" min="5" max="255" value="30" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="global-hp">HP <span class="muted-label">tags</span></label>
+          <input type="number" id="global-hp" min="1" max="254" value="10" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="global-shields">Shields</label>
+          <input type="number" id="global-shields" min="0" max="254" value="0" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="global-reloads">Reloads <span class="muted-label">0 = ∞</span></label>
+          <input type="number" id="global-reloads" min="0" max="99" value="0" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="global-ammo">Ammo <span class="muted-label">0 = ∞</span></label>
+          <input type="number" id="global-ammo" min="0" max="254" value="10" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="global-mega">Mega Shots</label>
+          <input type="number" id="global-mega" min="0" max="99" value="0" inputmode="numeric">
+        </div>
+        <div class="setting-item">
+          <label for="global-sleep">Sleep <span class="muted-label">min</span></label>
+          <input type="number" id="global-sleep" min="0" max="99" value="0" inputmode="numeric">
+        </div>
+      </div>
+      <div class="options-grid" aria-label="Game options">
+        <label class="opt-label"><input type="checkbox" id="opt-slow-tags"><span>Hit Cooldown</span></label>
+        <label class="opt-label"><input type="checkbox" id="opt-team-tags"><span>Team Tags</span></label>
+        <label class="opt-label"><input type="checkbox" id="opt-auto-reload"><span>Auto Reload</span></label>
+        <label class="opt-label"><input type="checkbox" id="opt-full-auto"><span>Full Auto</span></label>
+        <label class="opt-label"><input type="checkbox" id="opt-disable-iff" checked><span>Disable IFF</span></label>
+        <label class="opt-label"><input type="checkbox" id="opt-disable-hitreg" checked><span>Disable Hit Register</span></label>
+        <label class="opt-label opt-disabled" title="Not supported by the current host library"><input type="checkbox" id="opt-medic" disabled><span>Medic Mode</span></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-header">
+        <div>
+          <h2>Players</h2>
+          <p class="section-subtitle">Players join in the slot order shown below.</p>
+        </div>
+        <div class="inline-row">
+          <label class="sr-only" for="player-count">Player count</label>
+          <input type="number" id="player-count" min="1" max="24" value="3" class="count-input" inputmode="numeric">
+          <button type="button" class="pill-btn" onclick="buildPlayerSlots()">Update</button>
+        </div>
+      </div>
+      <div id="guided-join-hint" class="guided-hint" aria-live="polite"></div>
+      <div id="player-list" class="player-list"></div>
+    </section>
+
+    <section class="card debug-card">
+      <button type="button" class="section-toggle" id="debug-toggle" onclick="toggleDebug()" aria-expanded="false" aria-controls="debug-body">
+        <span>
+          <strong>Diagnostics</strong>
+          <small>Connection counters and event log</small>
+        </span>
+        <span id="debug-chevron" class="chevron" aria-hidden="true">▸</span>
+      </button>
+      <div id="debug-body" hidden>
+        <div id="telemetry-bar" class="telemetry-text">Connecting…</div>
+        <div id="log-header-row">
+          <span class="muted-label">Event log</span>
+          <span class="inline-row">
+            <button type="button" class="pill-btn" onclick="clearLog()">Clear</button>
+            <button type="button" class="pill-btn" onclick="saveLog()">Download</button>
+          </span>
+        </div>
+        <div id="log-box" role="log" aria-live="polite"></div>
+      </div>
+    </section>
+  </aside>
+
+  <section id="right-panel" aria-label="Live game status">
+    <section class="card overview-card">
+      <div class="section-header">
+        <div>
+          <h2>Session Overview</h2>
+          <p id="overview-message" class="section-subtitle">Ready to configure a game.</p>
+        </div>
+        <a href="/tv.html" target="_blank" rel="noopener" class="pill-btn link-btn">Open TV View ↗</a>
+      </div>
+      <div class="overview-grid">
+        <div class="overview-stat">
+          <strong id="overview-game">—</strong>
+          <span>Game</span>
+        </div>
+        <div class="overview-stat">
+          <strong id="overview-players">0 / 3</strong>
+          <span>Connected</span>
+        </div>
+        <div class="overview-stat">
+          <strong id="overview-ready">0</strong>
+          <span>Ready</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" id="live-card">
+      <div class="section-header">
+        <div>
+          <h2>Active Players</h2>
+          <p id="live-summary" class="section-subtitle">No taggers connected.</p>
+        </div>
+      </div>
+      <div id="live-player-list" class="live-list">
+        <div class="empty-state">
+          <div class="empty-icon" aria-hidden="true">⌁</div>
+          <strong>Waiting for a game</strong>
+          <span>Start hosting, then turn on each tagger in player order.</span>
+        </div>
+      </div>
+    </section>
+  </section>
+</main>
+
+<div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+<div id="preset-dialog" class="dialog-overlay" hidden>
+  <div class="dialog-box" role="dialog" aria-modal="true" aria-labelledby="preset-dialog-title">
+    <h3 id="preset-dialog-title">Save Preset</h3>
+    <p>Give this configuration a short, recognizable name.</p>
+    <label class="sr-only" for="preset-name-input">Preset name</label>
+    <input type="text" id="preset-name-input" class="dialog-input" placeholder="Family Game" maxlength="40">
+    <div class="dialog-buttons">
+      <button type="button" class="action-btn action-muted" onclick="closePresetDialog()">Cancel</button>
+      <button type="button" class="action-btn action-green" onclick="confirmSavePreset()">Save Preset</button>
+    </div>
+  </div>
+</div>
+
+<noscript><div class="noscript">JavaScript is required to operate the Lazer Tag server.</div></noscript>
+<script src="/js/signalr.min.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

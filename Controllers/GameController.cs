@@ -174,7 +174,7 @@ public sealed class GameController : ControllerBase
             else if (player.TeamPreference.HasValue &&
                      !InRange(player.TeamPreference.Value, 1, gameType.TeamCount))
             {
-                return Fail($"Player {player.Slot}'s team must be Auto or Team 1–{gameType.TeamCount}.", out error);
+                return Fail($"Player {player.Slot}'s team must be Auto or Team 1-{gameType.TeamCount}.", out error);
             }
             else
             {
@@ -184,15 +184,15 @@ public sealed class GameController : ControllerBase
             }
 
             if (player.Hp.HasValue && !InRange(player.Hp.Value, 1, 254))
-                return Fail($"Player {player.Slot}'s HP must be blank or 1–254.", out error);
+                return Fail($"Player {player.Slot}'s HP must be blank or 1-254.", out error);
             if (player.Shields.HasValue && !InRange(player.Shields.Value, 0, 254))
-                return Fail($"Player {player.Slot}'s shields must be blank or 0–254.", out error);
+                return Fail($"Player {player.Slot}'s shields must be blank or 0-254.", out error);
             if (player.Reloads is < 0 or > 99)
-                return Fail($"Player {player.Slot}'s reloads must be blank or 0–99.", out error);
+                return Fail($"Player {player.Slot}'s reloads must be blank or 0-99.", out error);
             if (player.Ammo.HasValue && !InRange(player.Ammo.Value, 0, 254))
-                return Fail($"Player {player.Slot}'s ammo must be blank or 0–254.", out error);
+                return Fail($"Player {player.Slot}'s ammo must be blank or 0-254.", out error);
             if (player.SleepTimeout.HasValue && !InRange(player.SleepTimeout.Value, 0, 99))
-                return Fail($"Player {player.Slot}'s sleep timeout must be blank or 0–99 minutes.", out error);
+                return Fail($"Player {player.Slot}'s sleep timeout must be blank or 0-99 minutes.", out error);
         }
 
         return true;

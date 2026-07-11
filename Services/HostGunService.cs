@@ -37,7 +37,7 @@ public sealed class HostGunService : IAsyncDisposable
     private int               _sessionGameCount;
     private int               _disposed;
 
-    // Planned player settings — indexed by join order
+    // Planned player settings - indexed by join order
     private List<string>  _plannedNames      = [];
     private List<int?>    _plannedTeams      = [];
     private List<int?>    _plannedHp         = [];
@@ -176,7 +176,7 @@ public sealed class HostGunService : IAsyncDisposable
                 MutateTelemetry(t => t with { RelayConnected = false });
                 _log.LogInformation("Auto-connect: relay not reachable");
                 if (wasConnected)
-                    await PushLogAsync("Relay disconnected. Retrying…");
+                    await PushLogAsync("Relay disconnected. Retrying...");
             }
 
             await PushTelemetryAsync();
@@ -315,7 +315,7 @@ public sealed class HostGunService : IAsyncDisposable
             Volatile.Write(ref _nextPeriodicBroadcastAtMs, Environment.TickCount64 + ClientBroadcastIntervalMs);
             _updateTimer.Change(UpdateIntervalMs, UpdateIntervalMs);
 
-            await PushLogAsync($"=== Game {_sessionGameCount} — {DateTime.Now:HH:mm} — {req.GameTypeLabel} ===");
+            await PushLogAsync($"=== Game {_sessionGameCount} - {DateTime.Now:HH:mm} - {req.GameTypeLabel} ===");
             await PushLogAsync($"Hosting on {RelayAddress}. Waiting for players to join.");
             await PushStateAsync();
             return (true, "");
@@ -355,7 +355,7 @@ public sealed class HostGunService : IAsyncDisposable
             }
 
             bool ok = hg.StartCountdown();
-            if (!ok) await PushLogAsync("Countdown not started — need at least two players.");
+            if (!ok) await PushLogAsync("Countdown not started - need at least two players.");
             return ok;
         }
         finally
@@ -457,8 +457,10 @@ public sealed class HostGunService : IAsyncDisposable
                     Slot         = p.TeamPlayerId.TeamPlayerNumber,
                     Name         = p.Name ?? "",
                     Confirmed    = p.Confirmed,
-                    HitsScored   = p.TaggedPlayerCounts.Sum(),   // total tags landed
-                    HitsTaken    = p.TagsTaken,                  // total tags received
+                    // Detailed LTAR reports may count repeated IR frames. Publish only
+                    // effective accepted hits so the TV agrees with HP and final score.
+                    HitsScored   = hg.CountEffectiveHitsScored(p),
+                    HitsTaken    = p.TagsTaken,
                     Score        = p.Score,
                     TaggerId     = p.TaggerId,
                     AllDebriefed = p.AllTagReportsReceived(),
@@ -488,7 +490,7 @@ public sealed class HostGunService : IAsyncDisposable
         if (joined < plannedNames.Length)
             return $"Waiting for {plannedNames[joined]} to connect.";
         if (plannedNames.Length > 0)
-            return "All players connected — tap Countdown when ready.";
+            return "All players connected - tap Countdown when ready.";
         return "Players may join.";
     }
 
@@ -560,7 +562,7 @@ public sealed class HostGunService : IAsyncDisposable
             string displayName = joined.Count <= plannedNames.Length
                 ? plannedNames[joined.Count - 1]
                 : newest.DisplayName;
-            _ = PushLogAsync($"Guided Join: {displayName} → {newest.TeamPlayerId.ToString(hg.GameDefinition?.IsTeamGame ?? false)}.");
+            _ = PushLogAsync($"Guided Join: {displayName} -> {newest.TeamPlayerId.ToString(hg.GameDefinition?.IsTeamGame ?? false)}.");
         }
     }
 
@@ -630,7 +632,7 @@ public sealed class HostGunService : IAsyncDisposable
         {
             if (!IsCurrentHost(sender)) return;
 
-            await PushLogAsync($"State: {e.PreviousState} → {e.State}");
+            await PushLogAsync($"State: {e.PreviousState} -> {e.State}");
 
             // Record timestamps so the TV can sync its timers on late connect
             if (e.State == HostGun.HostingStates.Countdown)
@@ -646,7 +648,7 @@ public sealed class HostGunService : IAsyncDisposable
                   && e.PreviousState != HostGun.HostingStates.GameOver
                   && e.PreviousState != HostGun.HostingStates.Idle)
             {
-                await PushLogAsync($"Warning: relay dropout during {e.PreviousState} — waiting for recovery.");
+                await PushLogAsync($"Warning: relay dropout during {e.PreviousState} - waiting for recovery.");
                 return;  // Skip PushStateAsync so TV stays on current screen
             }
 
@@ -729,7 +731,7 @@ public sealed class HostGunService : IAsyncDisposable
             _ when m.StartsWith("Explicit state machine: packet kind") => t with { UnexpectedPackets    = t.UnexpectedPackets    + 1 },
             _ when m.StartsWith("Explicit state machine timeout")      => t with { StateTimeouts        = t.StateTimeouts        + 1 },
             _ when m.StartsWith("Connect() failed")                    => t with { RelayConnectFailures = t.RelayConnectFailures + 1 },
-            // GamesCompleted is tracked via HostingStateChanged — do NOT also increment here
+            // GamesCompleted is tracked via HostingStateChanged - do NOT also increment here
             _                                                          => t,
         });
 

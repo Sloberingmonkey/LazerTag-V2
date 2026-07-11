@@ -12,7 +12,7 @@ public class StartGameRequest
     public int      Minutes          { get; set; } = 10;
     public int      CountdownSeconds { get; set; } = 30;
 
-    // Global stats — applied to all players unless overridden per-player
+    // Global stats - applied to all players unless overridden per-player
     public int  GlobalHp            { get; set; } = 10;
     public int  GlobalShields       { get; set; } = 0;
     public int? GlobalReloads       { get; set; } = 0;   // null/0 = unlimited (0xFF)
@@ -73,7 +73,7 @@ public class GameStateSnapshot
     public bool   IsTeamGame     { get; set; }
     public string GuidedJoinHint { get; set; } = "";
 
-    // Timer data — TV uses these to sync its countdown/game clock after late connect
+    // Timer data - TV uses these to sync its countdown/game clock after late connect
     public int  CountdownSeconds     { get; set; } = 30;
     public int  GameMinutes          { get; set; } = 10;
     public long ServerTimeMs         { get; set; }
@@ -92,7 +92,7 @@ public class PlayerSnapshot
     public string Name        { get; set; } = "";
     public bool   Confirmed   { get; set; }
 
-    /// <summary>Total tags landed, summed from TaggedPlayerCounts.</summary>
+    /// <summary>Effective accepted tags landed, with repeated IR frames capped per target HP.</summary>
     public int HitsScored   { get; set; }
 
     /// <summary>Total tags received, reported by the tagger.</summary>

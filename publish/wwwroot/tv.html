@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#05070f">
+<title>Lazer Tag TV</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #05070f;
+    --panel: #0c1220;
+    --panel-2: #11192a;
+    --border: #202b45;
+    --text: #edf3ff;
+    --muted: #7582a4;
+    --accent: #5a9cff;
+    --green: #32db88;
+    --red: #ff5d73;
+    --amber: #ffbd47;
+    --gold: #ffd75e;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  #header {
+    height: 64px;
+    padding: 0 40px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel);
+    border-bottom: 2px solid var(--border);
+  }
+  #header-title { font-size: 22px; font-weight: 900; color: var(--accent); letter-spacing: .12em; }
+  #header-status { font-size: 15px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  #header-status.playing { color: var(--green); }
+  #header-status.countdown { color: var(--amber); }
+
+  #main { height: calc(100vh - 64px); display: flex; align-items: center; justify-content: center; }
+  .phase { display: none; width: 100%; height: 100%; }
+  .phase.active { display: flex; }
+
+  #phase-idle { flex-direction: column; align-items: center; justify-content: center; gap: 20px; }
+  #idle-logo { font-size: clamp(58px, 6vw, 82px); font-weight: 950; color: var(--accent); letter-spacing: .1em; opacity: .82; }
+  #idle-sub { font-size: 20px; color: var(--muted); letter-spacing: .08em; }
+  #relay-indicator { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 15px; color: var(--muted); }
+  .relay-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); box-shadow: 0 0 10px rgba(255,93,115,.35); }
+  .relay-dot.on { background: var(--green); box-shadow: 0 0 10px rgba(50,219,136,.5); }
+
+  #phase-lobby { flex-direction: column; align-items: center; justify-content: center; padding: 28px 40px; }
+  #lobby-headline { font-size: clamp(38px, 4vw, 52px); font-weight: 950; color: var(--accent); letter-spacing: .08em; margin-bottom: 14px; }
+  #lobby-next { min-height: 32px; margin-bottom: 34px; font-size: 22px; color: var(--amber); font-weight: 750; }
+  #lobby-players { width: 100%; max-width: 1120px; display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
+  .lobby-card { min-width: 170px; padding: 18px 26px; text-align: center; background: var(--panel); border: 2px solid var(--border); border-radius: 12px; }
+  .lobby-card.confirmed { border-color: var(--green); background: rgba(50,219,136,.045); }
+  .lobby-card-name { margin-bottom: 6px; font-size: 24px; font-weight: 750; }
+  .lobby-card-tag { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .09em; }
+  .lobby-card.confirmed .lobby-card-tag { color: var(--green); }
+  .lobby-empty { color: var(--muted); font-size: 18px; }
+
+  #phase-countdown { flex-direction: column; align-items: center; justify-content: center; }
+  #countdown-label { height: 56px; font-size: 36px; font-weight: 800; color: var(--amber); letter-spacing: .15em; margin-bottom: 46px; }
+  #countdown-number {
+    display: inline-block;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 48px;
+    font-weight: 950;
+    line-height: 1;
+    color: #fff;
+    transform: scale(4);
+    transform-origin: center;
+  }
+  #countdown-number.urgent { color: var(--red); }
+
+  #phase-playing { flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 40px; }
+  #playing-label { font-size: 26px; font-weight: 800; color: var(--green); letter-spacing: .15em; }
+  #playing-clock { font-size: clamp(112px, 13vw, 164px); font-weight: 950; line-height: .95; letter-spacing: .03em; }
+  #playing-clock.urgent { color: var(--red); }
+  #playing-players { max-width: 1120px; display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .playing-card { min-width: 138px; padding: 12px 20px; text-align: center; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; }
+  .playing-card-name { margin-bottom: 3px; font-size: 19px; font-weight: 750; }
+  .playing-card-score { font-size: 13px; color: var(--muted); }
+  .playing-card-score span { color: var(--accent); font-weight: 800; }
+
+  #phase-debrief { flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding: 28px 40px; }
+  #debrief-title { font-size: 44px; font-weight: 950; color: var(--accent); letter-spacing: .1em; }
+  #debrief-subtitle { font-size: 20px; color: var(--muted); }
+  #debrief-players { max-width: 1120px; display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
+  .debrief-card { min-width: 190px; padding: 18px 28px; text-align: center; background: var(--panel); border: 2px solid var(--border); border-radius: 12px; }
+  .debrief-card.done { border-color: var(--green); }
+  .debrief-card.waiting { border-color: var(--amber); }
+  .debrief-card-name { margin-bottom: 7px; font-size: 22px; font-weight: 750; }
+  .debrief-card-status { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }
+  .debrief-card.done .debrief-card-status { color: var(--green); }
+  .debrief-card.waiting .debrief-card-status { color: var(--amber); }
+
+  #phase-scores { flex-direction: column; align-items: center; justify-content: flex-start; gap: 14px; padding: 18px 46px 22px; }
+  #scores-title { flex: 0 0 auto; font-size: 36px; font-weight: 950; color: var(--gold); letter-spacing: .1em; }
+  #scores-list { width: 100%; max-width: 1180px; min-height: 0; flex: 1 1 auto; overflow: hidden; }
+  .team-banner { display: flex; gap: 12px; justify-content: center; margin-bottom: 12px; }
+  .team-chip { min-width: 150px; padding: 8px 20px; text-align: center; background: var(--panel); border: 2px solid #444; border-radius: 10px; }
+  .team-chip.winner { background: rgba(255,215,94,.08); }
+  .team-chip-name { display: block; font-size: 14px; font-weight: 800; letter-spacing: .05em; }
+  .team-chip-score { display: block; margin: 2px 0; font-size: 27px; font-weight: 950; }
+  .team-chip-badge { display: block; min-height: 16px; font-size: 11px; color: var(--gold); font-weight: 800; }
+  .team-columns { display: grid; gap: 12px; height: calc(100% - 86px); }
+  .team-columns.teams-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .team-columns.teams-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .team-score-panel { min-width: 0; padding: 10px; background: rgba(12,18,32,.58); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .team-section-header { padding: 0 4px 8px; margin-bottom: 8px; font-size: 16px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; border-bottom: 2px solid; }
+  .team-player-list { display: flex; flex-direction: column; gap: 7px; }
+
+  .solo-score-list { display: flex; flex-direction: column; gap: 8px; height: 100%; }
+  .solo-score-list.compact .score-row { padding-block: 8px; }
+  .score-row {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr) 118px 118px;
+    align-items: center;
+    gap: 12px;
+    min-height: 57px;
+    padding: 10px 16px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+  }
+  .team-score-panel .score-row { grid-template-columns: 42px minmax(0, 1fr) 80px 80px; gap: 8px; min-height: 50px; padding: 8px 10px; }
+  .score-row.rank-1 { border-color: var(--gold); background: rgba(255,215,94,.07); }
+  .score-row.rank-2 { border-color: #8895aa; }
+  .score-row.rank-3 { border-color: #b87333; }
+  .score-rank { font-size: 19px; font-weight: 950; text-align: center; }
+  .rank-1 .score-rank { color: var(--gold); }
+  .rank-2 .score-rank { color: #c7ced9; }
+  .rank-3 .score-rank { color: #cd7f32; }
+  .score-rank.other { color: var(--muted); font-size: 16px; }
+  .score-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 22px; font-weight: 750; }
+  .team-score-panel .score-name { font-size: 17px; }
+  .score-col { text-align: right; }
+  .score-num { display: block; font-size: 23px; font-weight: 850; }
+  .team-score-panel .score-num { font-size: 18px; }
+  .score-lbl { display: block; margin-top: 1px; font-size: 9px; color: var(--muted); letter-spacing: .04em; }
+  .team-score-panel .score-lbl { font-size: 8px; }
+  .score-num.green { color: var(--green); }
+  .score-num.red { color: var(--red); }
+
+  @media (max-width: 900px), (max-height: 600px) {
+    #header { height: 54px; padding-inline: 24px; }
+    #main { height: calc(100vh - 54px); }
+    #phase-scores { padding: 12px 24px 16px; gap: 9px; }
+    #scores-title { font-size: 30px; }
+    .team-banner { margin-bottom: 8px; }
+    .team-chip { padding: 5px 14px; }
+    .team-chip-score { font-size: 22px; }
+    .team-columns { height: calc(100% - 70px); }
+  }
+</style>
+</head>
+<body>
+<div id="header">
+  <div id="header-title">⚡ LAZER TAG</div>
+  <div id="header-status">IDLE</div>
+</div>
+
+<main id="main">
+  <section class="phase active" id="phase-idle">
+    <div id="idle-logo">LAZER TAG</div>
+    <div id="idle-sub">READY TO PLAY</div>
+    <div id="relay-indicator">
+      <div class="relay-dot" id="relay-dot" aria-hidden="true"></div>
+      <span id="relay-text">Relay: connecting…</span>
+    </div>
+  </section>
+
+  <section class="phase" id="phase-lobby">
+    <div id="lobby-headline">WAITING FOR PLAYERS</div>
+    <div id="lobby-next"></div>
+    <div id="lobby-players"></div>
+  </section>
+
+  <section class="phase" id="phase-countdown">
+    <div id="countdown-label">GET READY</div>
+    <div id="countdown-number">–</div>
+  </section>
+
+  <section class="phase" id="phase-playing">
+    <div id="playing-label">● GAME IN PROGRESS</div>
+    <div id="playing-clock">0:00</div>
+    <div id="playing-players"></div>
+  </section>
+
+  <section class="phase" id="phase-debrief">
+    <div id="debrief-title">DEBRIEFING</div>
+    <div id="debrief-subtitle">Waiting for guns to report scores…</div>
+    <div id="debrief-players"></div>
+  </section>
+
+  <section class="phase" id="phase-scores">
+    <div id="scores-title">GAME OVER</div>
+    <div id="scores-list"></div>
+  </section>
+</main>
+
+<script src="/js/signalr.min.js"></script>
+<script>
+'use strict';
+
+const connection = new signalR.HubConnectionBuilder()
+    .withUrl('/gamehub')
+    .withAutomaticReconnect([0, 2000, 5000, 10000])
+    .build();
+
+let currentPhase = 'idle';
+let phaseStartMs = 0;
+let phaseTotalSecs = 0;
+let timerId = null;
+let signalRStarting = false;
+let retryTimer = null;
+let refreshTimer = null;
+const playingCards = new Map();
+
+connection.on('State', snapshot => applyState(snapshot));
+connection.on('Telemetry', telemetry => applyTelemetry(telemetry));
+connection.onreconnected(refreshSnapshots);
+connection.onclose(scheduleSignalRStart);
+
+window.addEventListener('DOMContentLoaded', async () => {
+    await refreshSnapshots();
+    await startSignalR();
+    refreshTimer = window.setInterval(refreshSnapshots, 5000);
+});
+
+window.addEventListener('beforeunload', () => {
+    stopTimer();
+    if (refreshTimer) window.clearInterval(refreshTimer);
+    if (retryTimer) window.clearTimeout(retryTimer);
+});
+
+async function fetchJson(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(response.statusText);
+    return response.json();
+}
+
+async function refreshSnapshots() {
+    try {
+        const [state, telemetry] = await Promise.all([
+            fetchJson('/api/game/state'),
+            fetchJson('/api/game/telemetry'),
+        ]);
+        applyState(state);
+        applyTelemetry(telemetry);
+    } catch (error) {
+        console.debug('TV snapshot refresh failed:', error);
+    }
+}
+
+async function startSignalR() {
+    if (signalRStarting || connection.state !== signalR.HubConnectionState.Disconnected) return;
+    signalRStarting = true;
+    try {
+        await connection.start();
+        await refreshSnapshots();
+    } catch (error) {
+        console.debug('TV SignalR connection failed:', error);
+        scheduleSignalRStart();
+    } finally {
+        signalRStarting = false;
+    }
+}
+
+function scheduleSignalRStart() {
+    if (retryTimer) return;
+    retryTimer = window.setTimeout(async () => {
+        retryTimer = null;
+        await startSignalR();
+    }, 3000);
+}
+
+function showPhase(name) {
+    document.querySelectorAll('.phase').forEach(phase => phase.classList.remove('active'));
+    document.getElementById(`phase-${name}`)?.classList.add('active');
+    currentPhase = name;
+}
+
+function startTimer() {
+    if (timerId) return;
+    timerId = window.setInterval(tickTimer, 100);
+}
+
+function stopTimer() {
+    if (timerId) window.clearInterval(timerId);
+    timerId = null;
+}
+
+function tickTimer() {
+    const elapsed = (Date.now() - phaseStartMs) / 1000;
+    const remaining = Math.max(0, phaseTotalSecs - elapsed);
+
+    if (currentPhase === 'countdown') {
+        const seconds = Math.ceil(remaining);
+        const number = document.getElementById('countdown-number');
+        const label = document.getElementById('countdown-label');
+
+        if (remaining <= 0) {
+            number.textContent = 'GO!';
+            number.className = '';
+            label.textContent = '';
+        } else {
+            label.textContent = 'GET READY';
+            number.textContent = String(seconds);
+            number.className = seconds <= 5 ? 'urgent' : '';
+        }
+    } else if (currentPhase === 'playing') {
+        const minutes = Math.floor(remaining / 60);
+        const seconds = Math.floor(remaining % 60);
+        const clock = document.getElementById('playing-clock');
+        clock.textContent = `${minutes}:${String(seconds).padStart(2, '0')}`;
+        clock.className = remaining <= 60 ? 'urgent' : '';
+    }
+}
+
+function serverOffset(startedAtMs, serverNowMs, totalSeconds) {
+    if (!startedAtMs || !serverNowMs) return 0;
+    const elapsedMs = serverNowMs - startedAtMs;
+    return Math.min(Math.max(0, elapsedMs), totalSeconds * 1000);
+}
+
+function applyState(snapshot) {
+    const state = String(snapshot.hostingState || 'Idle').toLowerCase();
+    const players = snapshot.players || [];
+    const status = document.getElementById('header-status');
+    status.textContent = snapshot.state || 'IDLE';
+    status.className = '';
+
+    if (state === 'idle') {
+        stopTimer();
+        showPhase('idle');
+        return;
+    }
+
+    if (state === 'adding' || state === 'acknowledgeplayerassignment') {
+        stopTimer();
+        showPhase('lobby');
+        renderLobby(snapshot, players);
+        return;
+    }
+
+    if (state === 'countdown' || state === 'resendcountdown') {
+        status.classList.add('countdown');
+        phaseTotalSecs = snapshot.countdownSeconds || 30;
+        phaseStartMs = Date.now() - serverOffset(snapshot.countdownStartedAtMs, snapshot.serverTimeMs, phaseTotalSecs);
+        document.getElementById('countdown-label').textContent = 'GET READY';
+        showPhase('countdown');
+        tickTimer();
+        startTimer();
+        return;
+    }
+
+    if (state === 'playing') {
+        status.classList.add('playing');
+        phaseTotalSecs = (snapshot.gameMinutes || 10) * 60;
+        const offset = serverOffset(snapshot.gameStartedAtMs, snapshot.serverTimeMs, phaseTotalSecs);
+        phaseStartMs = Date.now() - offset;
+
+        if (currentPhase !== 'playing') {
+            showPhase('playing');
+            buildPlayingPlayers(players);
+        } else {
+            updatePlayingScores(players);
+        }
+        tickTimer();
+        startTimer();
+        return;
+    }
+
+    if (['summary', 'debriefing', 'waitingfordebriefing'].includes(state)) {
+        stopTimer();
+        showPhase('debrief');
+        renderDebrief(players);
+        return;
+    }
+
+    if (state === 'gameover') {
+        stopTimer();
+        showPhase('scores');
+        renderScores(players, Boolean(snapshot.isTeamGame));
+        return;
+    }
+
+    stopTimer();
+    showPhase('idle');
+}
+
+function applyTelemetry(telemetry) {
+    const online = Boolean(telemetry?.relayConnected);
+    document.getElementById('relay-dot').classList.toggle('on', online);
+    document.getElementById('relay-text').textContent = online ? 'Relay: connected' : 'Relay: connecting…';
+}
+
+function renderLobby(snapshot, players) {
+    document.getElementById('lobby-next').textContent = snapshot.guidedJoinHint || '';
+    const list = document.getElementById('lobby-players');
+
+    if (!players.length) {
+        list.innerHTML = '<div class="lobby-empty">Turn on the first tagger to join.</div>';
+        return;
+    }
+
+    list.innerHTML = players.map(player => `
+      <article class="lobby-card${player.confirmed ? ' confirmed' : ''}">
+        <div class="lobby-card-name">${esc(player.name || player.id)}</div>
+        <div class="lobby-card-tag">${player.confirmed ? '✓ READY' : 'JOINING…'}</div>
+      </article>`).join('');
+}
+
+function buildPlayingPlayers(players) {
+    const list = document.getElementById('playing-players');
+    list.innerHTML = '';
+    playingCards.clear();
+
+    players.forEach(player => {
+        const card = document.createElement('article');
+        card.className = 'playing-card';
+        card.innerHTML = `
+          <div class="playing-card-name">${esc(player.name || player.id)}</div>
+          <div class="playing-card-score">Hits: <span class="hit-count">${hits(player.hitsScored)}</span></div>`;
+        playingCards.set(String(player.id), card);
+        list.appendChild(card);
+    });
+}
+
+function updatePlayingScores(players) {
+    const knownIds = new Set(players.map(player => String(player.id)));
+    const changedRoster = players.length !== playingCards.size ||
+        [...playingCards.keys()].some(id => !knownIds.has(id));
+
+    if (changedRoster) {
+        buildPlayingPlayers(players);
+        return;
+    }
+
+    players.forEach(player => {
+        const card = playingCards.get(String(player.id));
+        const count = card?.querySelector('.hit-count');
+        if (count) count.textContent = String(hits(player.hitsScored));
+    });
+}
+
+function renderDebrief(players) {
+    const reported = players.filter(player => player.allDebriefed).length;
+    document.getElementById('debrief-subtitle').textContent = `${reported} of ${players.length} guns have reported`;
+    document.getElementById('debrief-players').innerHTML = players.map(player => `
+      <article class="debrief-card ${player.allDebriefed ? 'done' : 'waiting'}">
+        <div class="debrief-card-name">${esc(player.name || player.id)}</div>
+        <div class="debrief-card-status">${player.allDebriefed ? '✓ REPORTED' : '⏳ WAITING…'}</div>
+      </article>`).join('');
+}
+
+function renderScores(players, isTeamGame) {
+    const list = document.getElementById('scores-list');
+    list.innerHTML = '';
+    if (!players.length) return;
+
+    if (!isTeamGame) {
+        const ranked = sortPlayers(players);
+        const solo = document.createElement('div');
+        solo.className = `solo-score-list${ranked.length > 7 ? ' compact' : ''}`;
+        ranked.forEach((player, index) => solo.appendChild(makePlayerRow(player, index + 1, false)));
+        list.appendChild(solo);
+        return;
+    }
+
+    const teamTotals = new Map();
+    players.forEach(player => {
+        const team = Number(player.team) || 0;
+        const current = teamTotals.get(team) || { shots: 0, score: 0 };
+        current.shots += hits(player.hitsScored);
+        current.score += Number(player.score) || 0;
+        teamTotals.set(team, current);
+    });
+
+    const teamOrder = [...teamTotals.keys()].sort((a, b) => {
+        const shotDifference = teamTotals.get(b).shots - teamTotals.get(a).shots;
+        return shotDifference || teamTotals.get(b).score - teamTotals.get(a).score;
+    });
+    const bestShots = teamTotals.get(teamOrder[0]).shots;
+    const winners = teamOrder.filter(team => teamTotals.get(team).shots === bestShots);
+
+    const banner = document.createElement('div');
+    banner.className = 'team-banner';
+    banner.innerHTML = teamOrder.map(team => {
+        const totals = teamTotals.get(team);
+        const winner = winners.includes(team);
+        const color = teamColor(team);
+        return `<div class="team-chip${winner ? ' winner' : ''}" style="border-color:${color}">
+          <span class="team-chip-name" style="color:${color}">${teamName(team)}</span>
+          <span class="team-chip-score">${totals.shots} shots</span>
+          <span class="team-chip-badge">${winner ? (winners.length > 1 ? 'TIE' : '🏆 WIN') : '&nbsp;'}</span>
+        </div>`;
+    }).join('');
+    list.appendChild(banner);
+
+    const columns = document.createElement('div');
+    columns.className = `team-columns teams-${Math.min(3, Math.max(2, teamOrder.length))}`;
+
+    teamOrder.forEach(team => {
+        const panel = document.createElement('section');
+        panel.className = 'team-score-panel';
+        const color = teamColor(team);
+        const members = sortPlayers(players.filter(player => Number(player.team) === team));
+        panel.innerHTML = `<div class="team-section-header" style="color:${color};border-color:${color}">${teamName(team)}</div>`;
+
+        const memberList = document.createElement('div');
+        memberList.className = 'team-player-list';
+        members.forEach((player, index) => memberList.appendChild(makePlayerRow(player, index + 1, true)));
+        panel.appendChild(memberList);
+        columns.appendChild(panel);
+    });
+
+    list.appendChild(columns);
+}
+
+function makePlayerRow(player, rank, compact) {
+    const labels = ['1ST', '2ND', '3RD'];
+    const row = document.createElement('div');
+    row.className = `score-row rank-${Math.min(rank, 4)}`;
+    row.innerHTML = `
+      <div class="score-rank${rank > 3 ? ' other' : ''}">${rank <= 3 ? labels[rank - 1] : rank}</div>
+      <div class="score-name">${esc(player.name || player.id)}</div>
+      <div class="score-col">
+        <span class="score-num green">${hits(player.hitsScored)}</span>
+        <span class="score-lbl">${compact ? 'LANDED' : 'SHOTS LANDED'}</span>
+      </div>
+      <div class="score-col">
+        <span class="score-num red">${hits(player.hitsTaken)}</span>
+        <span class="score-lbl">${compact ? 'TAKEN' : 'TIMES HIT'}</span>
+      </div>`;
+    return row;
+}
+
+function sortPlayers(players) {
+    return [...players].sort((a, b) => {
+        const hitDifference = hits(b.hitsScored) - hits(a.hitsScored);
+        return hitDifference || (Number(b.score) || 0) - (Number(a.score) || 0);
+    });
+}
+
+function teamColor(team) {
+    return ({ 1: '#e35b5b', 2: '#5a9cff', 3: '#4fd17e' })[team] || '#9aa7bb';
+}
+
+function teamName(team) {
+    return `Team ${team}`;
+}
+
+function hits(raw) {
+    return Math.max(0, Math.trunc(Number(raw) || 0));
+}
+
+function esc(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+</script>
+</body>
+</html>
