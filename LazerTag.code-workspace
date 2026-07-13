@@ -1,0 +1,35 @@
+{
+  "folders": [
+    {
+      "name": "⚡ LazerTagWebServer (Web App)",
+      "path": "LazerTagWebServer"
+    },
+    {
+      "name": "🔧 LazerTagHostLibrary (Game Engine)",
+      "path": "LazerTagHostLibrary"
+    },
+    {
+      "name": "📦 LazerTagServerApp (Old WinForms — reference)",
+      "path": "LazerTagServerApp"
+    }
+  ],
+  "settings": {
+    "editor.formatOnSave": true,
+    "editor.tabSize": 4,
+    "files.trimTrailingWhitespace": true,
+    "dotnet.defaultSolution": "LazerTagServer.sln",
+    "files.exclude": {
+      "**/bin": true,
+      "**/obj": true,
+      "**/.vs": true
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-dotnettools.csdevkit",
+      "ms-dotnettools.csharp",
+      "ms-dotnettools.vscode-dotnet-runtime",
+      "ms-vscode-remote.remote-ssh"
+    ]
+  }
+}

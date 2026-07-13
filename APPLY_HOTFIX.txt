@@ -1,0 +1,33 @@
+LazerTag debrief hotfix v4
+==========================
+
+Problem fixed
+-------------
+The second LTAR tagger returned a valid detailed report containing 0x8A.
+The hardened server rejected the byte as invalid BCD, so that report was never
+marked complete and the server requested it forever.
+
+Apply to the workstation project
+--------------------------------
+1. Stop any running local server.
+2. Extract this ZIP directly over C:\Server and choose Replace when prompted.
+3. From PowerShell in C:\Server, run:
+
+   dotnet test .\LazerTagWebServer.Tests\LazerTagWebServer.Tests.csproj -c Release
+
+4. Open the current project in VS Code and run the supported task:
+
+   Terminal > Run Task > Deploy Web Server to Pi
+
+   Use the hardened/atomic deployment task. Do not copy to /home/pi/lazertag.
+
+Expected field result
+---------------------
+A non-canonical detailed count may produce one warning such as:
+
+  Accepted non-canonical tag count 0x8A ... using legacy-compatible decoding
+
+The report should then be accepted, the second player should debrief, and the
+match should proceed to GameOver. Effective scoring remains capped by target HP.
+
+The ESP32 firmware is unchanged. Do not reflash it for this server hotfix.

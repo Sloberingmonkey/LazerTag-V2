@@ -1,0 +1,12 @@
+**/bin/
+**/obj/
+**/publish/
+artifacts/
+**/RelaySecrets.h
+**/appsettings.Production.json
+.env
+*.zip
+*.tar.gz
+*.user
+*.suo
+.vs/
