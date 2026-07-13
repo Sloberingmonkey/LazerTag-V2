@@ -1,51 +1,47 @@
-# LTAR Laser Tag Server
+# LazerTag Web Server
 
-Web-based game server for LTAR laser tag guns, running on a Raspberry Pi 3.
+ASP.NET Core 8 control server and live TV display for the LTAR arena appliance.
+The production architecture, build commands, security model, and deployment
+procedure are documented in the repository [`README.md`](../README.md) and
+[`deployment/PI_SETUP.md`](../deployment/PI_SETUP.md).
 
-## Architecture
+## Local development
 
-- **LazerTagHostLibrary** — C# game protocol engine (IR packet encoding, state machine, scoring)
-- **LazerTagWebServer** — ASP.NET Core 8 web server with SignalR real-time updates
-- **LazerTagServerApp** — Original Windows Forms host app (reference only, not used in production)
+With the .NET 8 SDK installed:
 
-## Hardware
-
-- Raspberry Pi 3 (Raspberry Pi OS Lite 64-bit, Trixie)
-- ESP32 WiFi relay board (IR bridge between Pi and LTAR guns via TCP)
-- LTAR / Tiger / Team Ops laser tag guns
-
-## Network Topology
-
-The Pi creates an open WiFi hotspot called "LazerTag". The ESP32 relay joins it as a client.
-
-| Device | IP | Role |
-|--------|----|------|
-| Raspberry Pi | 192.168.4.1 | Hotspot + web server (port 5000) |
-| ESP32 relay | 192.168.4.100 | IR bridge (port 8266) |
-| Phones/tablets | DHCP | Game controller UI via browser |
-| TV (via Pi HDMI) | localhost | Kiosk display (`/tv.html`) |
-
-## Requirements
-
-- .NET 8 ASP.NET Core Runtime (`linux-arm64`)
-- `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1` (set in the systemd service)
-
-## Build & Deploy
-
-```bash
-# From your dev machine (Windows)
-dotnet publish LazerTagWebServer -c Release -r linux-arm64
-scp -r LazerTagWebServer/bin/Release/net8.0/linux-arm64/publish/* pi@192.168.0.169:/home/pi/lazertag/
-ssh pi@192.168.0.169 "chmod +x /home/pi/lazertag/LazerTagWebServer && sudo systemctl restart lazertag"
+```powershell
+cd C:\Server
+$env:ASPNETCORE_ENVIRONMENT = 'Development'
+$env:Arena__OperatorPin = '73918426'
+$env:Arena__DisableRelayReconnect = 'true' # do not contact arena hardware
+dotnet run --project .\LazerTagWebServer\LazerTagWebServer.csproj
 ```
 
-## Usage
+Open `http://localhost:5000`. Development refuses game mutations until the
+operator console is unlocked. Do not use the example PIN in Production.
 
-1. Power on the Pi — the server starts automatically via systemd.
-2. Connect your phone to the "LazerTag" WiFi network.
-3. Open `http://192.168.4.1:5000` in any browser.
-4. Set up players, choose a game type, and tap **Start Hosting**.
-5. Turn on guns — they join in the order listed.
-6. Tap **Countdown** when all players are connected.
+Run the integration suite with:
 
-The TV display at `/tv.html` shows lobby, countdown, game clock, and scores automatically.
+```powershell
+dotnet test .\LazerTagWebServer.Tests\LazerTagWebServer.Tests.csproj -c Release
+```
+
+Production requires `Arena__OperatorPin`, uses `Arena__RelayAddress` for the
+ESP32 endpoint, and stores state under `Arena__DataDirectory`. The hardened Pi
+installer creates and protects those settings automatically.
+
+## Deploy from Visual Studio Code
+
+After completing the one-time Pi installation in
+[`deployment/PI_SETUP.md`](../deployment/PI_SETUP.md), open this
+`LazerTagWebServer` directory in Visual Studio Code and run:
+
+1. **Terminal > Run Task**
+2. **Deploy Web Server to Pi**
+3. Enter the Pi SSH target, such as `arenaadmin@192.168.1.50`
+
+The task publishes the latest code for `linux-arm64`, creates an archive,
+uploads it with SCP, and runs the installed Pi deployer. The deployer restarts
+the service, checks `/healthz`, and automatically restores the previous release
+if the new server does not become healthy. SSH keys are recommended; if the Pi
+requires a password or `sudo` password, enter it in the VS Code terminal.

@@ -91,7 +91,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   background: var(--green);
   box-shadow: 0 0 18px rgba(57, 217, 138, 0.2);
 }
-.phase-pill, .relay-badge {
+.phase-pill, .relay-badge, .operator-badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -110,6 +110,23 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 .phase-playing { color: var(--green); background: rgba(57, 217, 138, 0.09); border-color: rgba(57, 217, 138, 0.38); }
 .phase-summary, .phase-gameover { color: var(--purple); background: rgba(184, 153, 255, 0.1); border-color: rgba(184, 153, 255, 0.38); }
 .relay-badge { padding: 5px 12px; gap: 7px; letter-spacing: 0.02em; text-transform: none; }
+.header-status { display: flex; align-items: center; gap: 8px; }
+.operator-badge {
+  padding: 5px 12px;
+  gap: 7px;
+  color: #ffd2d7;
+  background: rgba(255, 105, 120, 0.07);
+  border-color: rgba(255, 105, 120, 0.35);
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.operator-badge > span:first-child { color: var(--red); font-size: 9px; }
+.operator-badge.operator-ready {
+  color: #bff5dc;
+  background: rgba(57, 217, 138, 0.08);
+  border-color: rgba(57, 217, 138, 0.35);
+}
+.operator-badge.operator-ready > span:first-child { color: var(--green); }
 .relay-dot-sm {
   width: 8px;
   height: 8px;
@@ -509,6 +526,24 @@ input:invalid { border-color: var(--red); }
 .dialog-box h3 { margin: 0 0 7px; font-size: 18px; }
 .dialog-box p { margin: 0 0 14px; color: var(--muted); font-size: 13px; }
 .dialog-input { min-height: 44px !important; }
+.auth-overlay { z-index: 110; background: rgba(2, 5, 9, .9); }
+.auth-box { width: min(460px, 100%); }
+.auth-mark {
+  width: 48px;
+  height: 48px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 16px;
+  color: #09110d;
+  background: var(--green);
+  border-radius: 12px;
+  font-size: 24px;
+  box-shadow: 0 0 26px rgba(57, 217, 138, .2);
+}
+.auth-box > label { display: block; margin-bottom: 6px; color: #dbe6f2; font-weight: 700; }
+.auth-box .dialog-input { width: 100%; }
+.auth-tv-link { text-decoration: none; }
+.form-error { margin: 9px 0 0 !important; color: #ff9da8 !important; }
 .dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .dialog-buttons .action-btn { min-width: 112px; }
 .toast-region {
@@ -561,7 +596,8 @@ input:invalid { border-color: var(--red); }
   .brand { font-size: 14px; }
   .brand-mark { width: 30px; height: 30px; }
   .phase-pill { min-width: 78px; }
-  .relay-badge { grid-column: 1 / -1; justify-self: stretch; }
+  .header-status { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; }
+  .relay-badge, .operator-badge { justify-self: stretch; }
   #action-bar {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 7px;

@@ -14,7 +14,7 @@ public sealed class HostGunService : IAsyncDisposable
 {
     // ── Constants ────────────────────────────────────────────────────────────────
 
-    private const string RelayAddress          = "192.168.4.100:8266";
+    private const string DefaultRelayAddress   = "192.168.4.100:8266";
     private const int    ReconnectIntervalMs   = 5000;
     private const int    UpdateIntervalMs      = 100;
     private const int    ClientBroadcastIntervalMs = 1000;
@@ -24,6 +24,7 @@ public sealed class HostGunService : IAsyncDisposable
 
     private readonly IHubContext<GameHub>       _hub;
     private readonly ILogger<HostGunService>    _log;
+    private readonly string                     _relayAddress;
 
     // ── State ─────────────────────────────────────────────────────────────────────
 
@@ -65,6 +66,7 @@ public sealed class HostGunService : IAsyncDisposable
         get { lock (_lock) { return _hostGun != null; } }
     }
     public bool IsRelayConnected => Telemetry.RelayConnected;
+    public string RelayAddress => _relayAddress;
 
     // ── Timers ────────────────────────────────────────────────────────────────────
 
@@ -73,16 +75,25 @@ public sealed class HostGunService : IAsyncDisposable
 
     // ── Constructor ───────────────────────────────────────────────────────────────
 
-    public HostGunService(IHubContext<GameHub> hub, ILogger<HostGunService> log)
+    public HostGunService(
+        IHubContext<GameHub> hub,
+        ILogger<HostGunService> log,
+        IConfiguration configuration)
     {
         _hub = hub;
         _log = log;
+        _relayAddress = ValidateRelayAddress(configuration["Arena:RelayAddress"] ?? DefaultRelayAddress);
 
         Log.MinimumSeverity = Log.Severity.Information;
         Log.EntryAdded     += OnLibraryLog;
 
-        _updateTimer    = new Timer(OnUpdateTick,    null, Timeout.Infinite, Timeout.Infinite);
-        _reconnectTimer = new Timer(OnReconnectTick, null, 2000, ReconnectIntervalMs);
+        _updateTimer = new Timer(OnUpdateTick, null, Timeout.Infinite, Timeout.Infinite);
+        bool disableReconnect = configuration.GetValue<bool>("Arena:DisableRelayReconnect");
+        _reconnectTimer = new Timer(
+            OnReconnectTick,
+            null,
+            disableReconnect ? Timeout.Infinite : 2000,
+            disableReconnect ? Timeout.Infinite : ReconnectIntervalMs);
     }
 
     // ── Thread-safe telemetry mutation ────────────────────────────────────────────
@@ -142,7 +153,7 @@ public sealed class HostGunService : IAsyncDisposable
             }
 
             DisconnectPreConnect();
-            _log.LogInformation("Auto-connect: attempting {Address}", RelayAddress);
+            _log.LogInformation("Auto-connect: attempting {Address}", _relayAddress);
 
             var serial = new LazerTagSerial();
             MutateTelemetry(t => t with { RelayConnectAttempts = t.RelayConnectAttempts + 1 });
@@ -150,7 +161,7 @@ public sealed class HostGunService : IAsyncDisposable
             bool connected;
             try
             {
-                connected = await Task.Run(() => serial.Connect(RelayAddress));
+                connected = await Task.Run(() => serial.Connect(_relayAddress));
             }
             catch (Exception ex)
             {
@@ -167,7 +178,7 @@ public sealed class HostGunService : IAsyncDisposable
                 // Only set the current status here to avoid counting one connection twice.
                 MutateTelemetry(t => t with { RelayConnected = true });
                 _log.LogInformation("Auto-connect: relay connected");
-                await PushLogAsync($"Relay connected at {RelayAddress}.");
+                await PushLogAsync($"Relay connected at {_relayAddress}.");
             }
             else
             {
@@ -284,7 +295,7 @@ public sealed class HostGunService : IAsyncDisposable
                 UseStandardLtarBeacons           = false,
             };
 
-            var hg = new HostGun(RelayAddress);
+            var hg = new HostGun(_relayAddress);
             hg.PlayerListChanged   += HostGun_PlayerListChanged;
             hg.HostingStateChanged += HostGun_HostingStateChanged;
             hg.Protocol.IoError    += Protocol_IoError;
@@ -316,7 +327,7 @@ public sealed class HostGunService : IAsyncDisposable
             _updateTimer.Change(UpdateIntervalMs, UpdateIntervalMs);
 
             await PushLogAsync($"=== Game {_sessionGameCount} - {DateTime.Now:HH:mm} - {req.GameTypeLabel} ===");
-            await PushLogAsync($"Hosting on {RelayAddress}. Waiting for players to join.");
+            await PushLogAsync($"Hosting on {_relayAddress}. Waiting for players to join.");
             await PushStateAsync();
             return (true, "");
         }
@@ -332,8 +343,24 @@ public sealed class HostGunService : IAsyncDisposable
         }
     }
 
-    /// <summary>Advance past game-over state.</summary>
-    public Task NextAsync() => CleanupHostAsync();
+    /// <summary>Clear a completed/aborted host and prepare for another game.</summary>
+    public async Task<bool> NextAsync()
+    {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            var hg = _hostGun;
+            if (hg != null && hg.HostingState is not HostGun.HostingStates.GameOver and not HostGun.HostingStates.Idle)
+                return false;
+
+            await CleanupHostCoreAsync(pushUpdates: true);
+            return true;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
 
     public async Task<bool> StartCountdownAsync()
     {
@@ -346,11 +373,26 @@ public sealed class HostGunService : IAsyncDisposable
             string[] plannedNames;
             lock (_lock) { plannedNames = _plannedNames.ToArray(); }
 
-            int joined = hg.Players.Count;
-            if (plannedNames.Length > 0 && joined < plannedNames.Length)
+            var joinedPlayers = hg.Players.ToList();
+            int joined = joinedPlayers.Count;
+            if (plannedNames.Length > 0 && joined != plannedNames.Length)
             {
-                string waiting = joined < plannedNames.Length ? plannedNames[joined] : "next player";
-                await PushLogAsync($"Still waiting for {waiting} to connect.");
+                if (joined < plannedNames.Length)
+                {
+                    string waiting = plannedNames[joined];
+                    await PushLogAsync($"Still waiting for {waiting} to connect.");
+                }
+                else
+                {
+                    await PushLogAsync("Countdown blocked: more taggers joined than were planned. End hosting and restart the roster.");
+                }
+                return false;
+            }
+
+            var unconfirmed = joinedPlayers.Where(player => !player.Confirmed).ToList();
+            if (unconfirmed.Count > 0)
+            {
+                await PushLogAsync($"Countdown blocked: {unconfirmed.Count} tagger(s) have not confirmed their assignment.");
                 return false;
             }
 
@@ -375,6 +417,12 @@ public sealed class HostGunService : IAsyncDisposable
             await PushLogAsync($"Game ended early (state: {hg.HostingState}).");
             hg.EndGame();
             await Task.Delay(StartDelayMs);
+
+            // Ending from the lobby/countdown transitions the library directly to Idle. Dispose
+            // that host now so the next Start Hosting action cannot dead-end on a stale instance.
+            if (hg.HostingState == HostGun.HostingStates.Idle)
+                await CleanupHostCoreAsync(pushUpdates: false);
+
             await PushStateAsync();
             return true;
         }
@@ -752,7 +800,7 @@ public sealed class HostGunService : IAsyncDisposable
         return true;
     }
 
-    private Task PushLogAsync(string msg)  => GameHub.HasClients ? _hub.Clients.All.SendAsync("Log",       msg) : Task.CompletedTask;
+    private Task PushLogAsync(string msg)  => GameHub.HasClients ? _hub.Clients.Group(GameHub.OperatorsGroup).SendAsync("Log", msg) : Task.CompletedTask;
     private Task PushStateAsync()          => GameHub.HasClients ? _hub.Clients.All.SendAsync("State",     GetGameState()) : Task.CompletedTask;
     private Task PushTelemetryAsync()      => GameHub.HasClients ? _hub.Clients.All.SendAsync("Telemetry", Telemetry) : Task.CompletedTask;
     private Task PushStateAndTelemetryAsync() => Task.WhenAll(PushStateAsync(), PushTelemetryAsync());
@@ -794,6 +842,21 @@ public sealed class HostGunService : IAsyncDisposable
         // brief chance to finish before disposing the protocol it is using.
         for (int attempt = 0; attempt < 50 && Volatile.Read(ref _isUpdating) != 0; attempt++)
             await Task.Delay(10);
+    }
+
+    private static string ValidateRelayAddress(string value)
+    {
+        value = value.Trim();
+        int separator = value.LastIndexOf(':');
+        if (separator <= 0 || separator == value.Length - 1)
+            throw new InvalidOperationException("Arena:RelayAddress must use the form host:port.");
+
+        string host = value[..separator];
+        string portText = value[(separator + 1)..];
+        if (host.Any(char.IsWhiteSpace) || !int.TryParse(portText, out int port) || port is < 1 or > 65535)
+            throw new InvalidOperationException("Arena:RelayAddress must contain a valid host and TCP port.");
+
+        return value;
     }
 
     // ── IAsyncDisposable ──────────────────────────────────────────────────────────

@@ -1,7 +1,9 @@
 using LazerTagHostLibrary;
 using LazerTagWebServer.Models;
+using LazerTagWebServer.Security;
 using LazerTagWebServer.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace LazerTagWebServer.Controllers;
 
@@ -9,7 +11,10 @@ namespace LazerTagWebServer.Controllers;
 [Route("api/[controller]")]
 public sealed class GameController : ControllerBase
 {
-    private sealed record GameTypeOption(int Id, string Label, int TeamCount, bool IsDefault = false);
+    private sealed record GameTypeOption(int Id, string Label, int TeamCount, bool IsDefault = false)
+    {
+        public int MaxPlayers => TeamCount <= 1 ? 24 : TeamCount * 8;
+    }
 
     private static readonly GameTypeOption[] GameTypeOptions =
     [
@@ -63,6 +68,7 @@ public sealed class GameController : ControllerBase
     }
 
     [HttpGet("savedplayers")]
+    [OperatorAuthorize]
     public IActionResult GetSavedPlayers()
     {
         var (count, rows) = _service.LoadSavedPlayers();
@@ -70,6 +76,8 @@ public sealed class GameController : ControllerBase
     }
 
     [HttpPost("connect")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
     public async Task<IActionResult> Connect()
     {
         bool connected = await _service.EnsureRelayConnectedAsync();
@@ -80,6 +88,8 @@ public sealed class GameController : ControllerBase
     }
 
     [HttpPost("start")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
     public async Task<IActionResult> Start([FromBody] StartGameRequest req)
     {
         if (!TryValidateAndNormalize(req, out string error))
@@ -93,15 +103,19 @@ public sealed class GameController : ControllerBase
     }
 
     [HttpPost("countdown")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
     public async Task<IActionResult> Countdown()
     {
         bool started = await _service.StartCountdownAsync();
         return started
             ? Ok(new { Success = true })
-            : Conflict(new { Error = "Countdown could not start. Confirm that every planned player is connected and at least two players have joined." });
+            : Conflict(new { Error = "Countdown could not start. Confirm the exact planned roster is connected and every tagger shows Ready." });
     }
 
     [HttpPost("endgame")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
     public async Task<IActionResult> EndGame()
     {
         bool ended = await _service.EndGameAsync();
@@ -111,17 +125,25 @@ public sealed class GameController : ControllerBase
     }
 
     [HttpPost("next")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
     public async Task<IActionResult> Next()
     {
-        await _service.NextAsync();
-        return Ok(new { Success = true });
+        bool cleared = await _service.NextAsync();
+        return cleared
+            ? Ok(new { Success = true })
+            : Conflict(new { Error = "The game cannot be cleared until debriefing reaches Game Over. Use End Game again only if you must force missing reports." });
     }
 
     [HttpPost("cleanup")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
     public async Task<IActionResult> Cleanup()
     {
-        await _service.CleanupHostAsync();
-        return Ok(new { Success = true });
+        bool cleared = await _service.NextAsync();
+        return cleared
+            ? Ok(new { Success = true })
+            : Conflict(new { Error = "The game cannot be cleared until debriefing reaches Game Over." });
     }
 
     private static bool TryValidateAndNormalize(StartGameRequest req, out string error)
@@ -150,8 +172,8 @@ public sealed class GameController : ControllerBase
         if (!InRange(req.GlobalSleepTimeout, 0, 99))
             return Fail("Global sleep timeout must be between 0 and 99 minutes.", out error);
 
-        if (req.Players is null || req.Players.Count is < 1 or > 24)
-            return Fail("Player count must be between 1 and 24.", out error);
+        if (req.Players is null || req.Players.Count < 2 || req.Players.Count > gameType.MaxPlayers)
+            return Fail($"Player count for {gameType.Label} must be between 2 and {gameType.MaxPlayers}.", out error);
 
         var usedSlots = new HashSet<int>();
         foreach (var player in req.Players)
@@ -159,8 +181,8 @@ public sealed class GameController : ControllerBase
             if (player is null)
                 return Fail("Player entries cannot be empty.", out error);
 
-            if (!InRange(player.Slot, 1, 24) || !usedSlots.Add(player.Slot))
-                return Fail("Each player must have a unique slot from 1 to 24.", out error);
+            if (!InRange(player.Slot, 1, gameType.MaxPlayers) || !usedSlots.Add(player.Slot))
+                return Fail($"Each player must have a unique slot from 1 to {gameType.MaxPlayers}.", out error);
 
             player.Name = (player.Name ?? "").Trim();
             if (player.Name.Length > 40)

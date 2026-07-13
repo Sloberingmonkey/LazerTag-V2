@@ -9,17 +9,21 @@ let currentSnapshot = null;
 let currentTelemetry = null;
 let logLines = [];
 let signalRStarting = false;
+let signalRRestarting = false;
 let signalRRetryTimer = null;
 let refreshTimer = null;
 let actionInProgress = null;
+let operatorToken = null;
+let operatorAuthenticated = false;
 let _lastStateKey = null;
 let _lastTelemetryKey = null;
 
 const MAX_LOG = 1000;
 const PRESETS_KEY = 'lazertag_presets';
+const OPERATOR_TOKEN_KEY = 'lazertag_operator_token';
 
 const connection = new signalR.HubConnectionBuilder()
-    .withUrl('/gamehub')
+    .withUrl('/gamehub', { accessTokenFactory: () => operatorToken || '' })
     .withAutomaticReconnect([0, 2000, 5000, 10000])
     .build();
 
@@ -32,6 +36,7 @@ connection.onreconnected(async () => {
     await refreshSnapshots();
 });
 connection.onclose(() => {
+    if (signalRRestarting) return;
     appendLog('Live connection closed. Retrying…');
     scheduleSignalRStart();
 });
@@ -40,8 +45,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     updateActionBar('idle');
     renderPresets();
 
+    document.getElementById('login-form').addEventListener('submit', loginOperator);
+    operatorToken = readSessionValue(OPERATOR_TOKEN_KEY);
+    await checkOperatorSession();
+
     await loadGameTypes();
-    await loadSavedPlayers();
+    if (operatorAuthenticated) await loadSavedPlayers();
     buildPlayerSlots(savedPlayers.rows);
     updateOverview();
 
@@ -64,7 +73,10 @@ window.addEventListener('beforeunload', () => {
 
 // ── Server communication ──────────────────────────────────────────────────────
 async function fetchJson(url, options = {}) {
-    const response = await fetch(url, options);
+    const headers = new Headers(options.headers || {});
+    if (operatorToken) headers.set('Authorization', `Bearer ${operatorToken}`);
+
+    const response = await fetch(url, { ...options, headers });
     const text = await response.text();
     let data = {};
 
@@ -74,10 +86,149 @@ async function fetchJson(url, options = {}) {
     }
 
     if (!response.ok) {
-        throw new Error(data.error || data.title || response.statusText || `Request failed (${response.status})`);
+        if (response.status === 401 && url !== '/api/operator/login') {
+            setOperatorAuthenticated(false, true);
+        }
+
+        const error = new Error(data.error || data.title || response.statusText || `Request failed (${response.status})`);
+        error.status = response.status;
+        throw error;
     }
 
     return data;
+}
+
+// ── Operator access ──────────────────────────────────────────────────────────
+async function checkOperatorSession() {
+    if (!operatorToken) {
+        setOperatorAuthenticated(false, true);
+        return;
+    }
+
+    try {
+        await fetchJson('/api/operator/status');
+        setOperatorAuthenticated(true, false);
+    } catch {
+        setOperatorAuthenticated(false, true);
+    }
+}
+
+async function loginOperator(event) {
+    event.preventDefault();
+    const pinInput = document.getElementById('operator-pin');
+    const submit = document.getElementById('login-submit');
+    const errorText = document.getElementById('login-error');
+
+    if (!pinInput.checkValidity()) {
+        pinInput.reportValidity();
+        return;
+    }
+
+    submit.disabled = true;
+    errorText.hidden = true;
+    try {
+        const result = await fetchJson('/api/operator/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: pinInput.value }),
+        });
+
+        operatorToken = result.token;
+        writeSessionValue(OPERATOR_TOKEN_KEY, operatorToken);
+        pinInput.value = '';
+        setOperatorAuthenticated(true, false);
+        await restartSignalRForOperator();
+        await loadSavedPlayers();
+        if ((currentSnapshot?.hostingState || 'idle').toLowerCase() === 'idle') {
+            buildPlayerSlots(savedPlayers.rows);
+        }
+        showToast('Operator controls unlocked.', 'success');
+    } catch (error) {
+        errorText.textContent = error.status === 429
+            ? 'Too many attempts. Wait one minute and try again.'
+            : error.message;
+        errorText.hidden = false;
+        pinInput.select();
+    } finally {
+        submit.disabled = false;
+    }
+}
+
+function setOperatorAuthenticated(authenticated, showDialog) {
+    operatorAuthenticated = Boolean(authenticated);
+    if (!operatorAuthenticated) {
+        operatorToken = null;
+        removeSessionValue(OPERATOR_TOKEN_KEY);
+    }
+
+    const button = document.getElementById('operator-button');
+    const text = document.getElementById('operator-button-text');
+    if (button && text) {
+        button.classList.toggle('operator-ready', operatorAuthenticated);
+        button.classList.toggle('operator-locked', !operatorAuthenticated);
+        button.setAttribute('aria-label', operatorAuthenticated ? 'Lock operator controls' : 'Unlock operator controls');
+        text.textContent = operatorAuthenticated ? 'Operator ready' : 'Operator locked';
+    }
+
+    const dialog = document.getElementById('login-dialog');
+    if (dialog) dialog.hidden = operatorAuthenticated || !showDialog;
+    updateActionBar(currentSnapshot?.hostingState || 'idle');
+
+    if (!operatorAuthenticated && showDialog) {
+        window.setTimeout(() => document.getElementById('operator-pin')?.focus(), 0);
+    }
+}
+
+function showLoginDialog() {
+    const dialog = document.getElementById('login-dialog');
+    if (dialog) dialog.hidden = false;
+    window.setTimeout(() => document.getElementById('operator-pin')?.focus(), 0);
+}
+
+async function toggleOperatorAccess() {
+    if (!operatorAuthenticated) {
+        showLoginDialog();
+        return;
+    }
+
+    if (!window.confirm('Lock operator controls on this device?')) return;
+    try { await fetchJson('/api/operator/logout', { method: 'POST' }); }
+    catch { /* Local lock still takes effect if the network disappeared. */ }
+    setOperatorAuthenticated(false, true);
+    await restartSignalRForOperator();
+}
+
+async function restartSignalRForOperator() {
+    if (signalRRetryTimer) {
+        window.clearTimeout(signalRRetryTimer);
+        signalRRetryTimer = null;
+    }
+
+    signalRRestarting = true;
+    try {
+        if (connection.state !== signalR.HubConnectionState.Disconnected) {
+            try { await connection.stop(); }
+            catch { /* The regular reconnect path will recover. */ }
+        }
+    } finally {
+        signalRRestarting = false;
+    }
+    await startSignalR();
+}
+
+function readSessionValue(key) {
+    try { return sessionStorage.getItem(key); }
+    catch { return null; }
+}
+
+function writeSessionValue(key, value) {
+    try { sessionStorage.setItem(key, value); }
+    catch { /* The current page still retains the token in memory. */ }
+}
+
+function removeSessionValue(key) {
+    try { sessionStorage.removeItem(key); }
+    catch { /* Nothing else to do. */ }
 }
 
 async function refreshSnapshots() {
@@ -138,9 +289,10 @@ async function loadGameTypes() {
 }
 
 async function loadSavedPlayers() {
+    if (!operatorAuthenticated) return;
     try {
         savedPlayers = await fetchJson('/api/game/savedplayers');
-        const count = clamp(parseInt(savedPlayers.playerCount, 10) || 3, 1, 24);
+        const count = clamp(parseInt(savedPlayers.playerCount, 10) || 3, 2, getMaxPlayers());
         savedPlayers.playerCount = count;
         document.getElementById('player-count').value = count;
     } catch (error) {
@@ -158,6 +310,7 @@ async function applyGameTypeMetadata(applyDefaults) {
 
     currentTeamCount = Math.max(1, Number(metadata?.teamCount) || 1);
     isTeamGame = currentTeamCount > 1;
+    syncPlayerCountLimit(metadata?.maxPlayers);
     updateTeamSelectors();
 
     if (applyDefaults && Number.isFinite(selectedId)) {
@@ -196,11 +349,15 @@ function updateActionBar(state) {
     const isIdle = normalized === 'idle' || normalized === '';
     const isLobby = normalized === 'adding' || normalized === 'acknowledgeplayerassignment';
     const isActive = normalized === 'countdown' || normalized === 'resendcountdown' || normalized === 'playing';
-    const isOver = ['gameover', 'summary', 'debriefing', 'waitingfordebriefing'].includes(normalized);
+    const isSummary = ['summary', 'debriefing', 'waitingfordebriefing'].includes(normalized);
+    const isOver = normalized === 'gameover';
+
+    const endLabel = document.getElementById('end-action-label');
+    if (endLabel) endLabel.textContent = isSummary ? 'Force Finish' : 'End Game';
 
     setBtn('btn-start', isIdle);
     setBtn('btn-countdown', isLobby);
-    setBtn('btn-end', isLobby || isActive);
+    setBtn('btn-end', isLobby || isActive || isSummary);
     setBtn('btn-next', isOver);
 }
 
@@ -208,7 +365,7 @@ function setBtn(id, enabled) {
     const button = document.getElementById(id);
     if (!button) return;
     button.dataset.available = enabled ? 'true' : 'false';
-    button.disabled = !enabled || actionInProgress !== null;
+    button.disabled = !enabled || actionInProgress !== null || !operatorAuthenticated;
     button.classList.toggle('is-busy', actionInProgress === id);
 }
 
@@ -225,7 +382,7 @@ function clearActionBusy() {
 // ── Player setup ──────────────────────────────────────────────────────────────
 function buildPlayerSlots(rows) {
     const countInput = document.getElementById('player-count');
-    const count = clamp(parseInt(countInput.value, 10) || 3, 1, 24);
+    const count = clamp(parseInt(countInput.value, 10) || 3, 2, getMaxPlayers());
     countInput.value = count;
 
     let sourceRows = rows;
@@ -519,19 +676,27 @@ async function startCountdown() {
 }
 
 async function endGame() {
-    if (!window.confirm('End the current game now?')) return;
+    const isSummary = (currentSnapshot?.hostingState || '').toLowerCase() === 'summary';
+    const message = isSummary
+        ? 'Force debriefing to finish? Taggers that have not reported will be dropped and their scores may be incomplete.'
+        : 'End the current game now?';
+    if (!window.confirm(message)) return;
     await runAction('btn-end', '/api/game/endgame', {
-        successMessage: 'Game ended.',
+        successMessage: isSummary ? 'Debriefing forced to Game Over.' : 'Game ended.',
     });
 }
 
 async function nextStep() {
-    await runAction('btn-next', '/api/game/cleanup', {
+    await runAction('btn-next', '/api/game/next', {
         successMessage: 'Game cleared. The next setup is ready.',
     });
 }
 
 async function runAction(buttonId, url, { body = null, successMessage = '' } = {}) {
+    if (!operatorAuthenticated) {
+        showLoginDialog();
+        return;
+    }
     if (actionInProgress) return;
     setActionBusy(buttonId);
 
@@ -615,7 +780,7 @@ function applyState(snapshot) {
     document.getElementById('guided-join-hint').textContent = snapshot.guidedJoinHint || '';
 
     const readyCount = players.filter(player => player.confirmed).length;
-    const plannedCount = clamp(intVal('player-count'), 1, 24);
+    const plannedCount = clamp(intVal('player-count'), 2, getMaxPlayers());
     document.getElementById('overview-players').textContent = `${players.length} / ${plannedCount}`;
     document.getElementById('overview-ready').textContent = String(readyCount);
     document.getElementById('overview-message').textContent = overviewMessage(state, players.length, plannedCount);
@@ -687,7 +852,7 @@ function applyTelemetry(telemetry) {
 
 function updateOverview() {
     const selected = gameTypes.find(type => String(type.id) === document.getElementById('game-type-select')?.value);
-    const count = clamp(intVal('player-count') || 3, 1, 24);
+    const count = clamp(intVal('player-count') || 3, 2, getMaxPlayers());
     const game = selected?.label || '—';
     const connected = currentSnapshot?.players?.length || 0;
     const ready = currentSnapshot?.players?.filter(player => player.confirmed).length || 0;
@@ -786,6 +951,31 @@ function setVal(id, value) {
 function setChk(id, value) {
     const element = document.getElementById(id);
     if (element) element.checked = Boolean(value);
+}
+
+function getMaxPlayers() {
+    const selectedId = parseInt(document.getElementById('game-type-select')?.value, 10);
+    const metadata = gameTypes.find(type => Number(type.id) === selectedId);
+    const declared = Number(metadata?.maxPlayers);
+    if (Number.isFinite(declared) && declared >= 2) return declared;
+    return isTeamGame ? currentTeamCount * 8 : 24;
+}
+
+function syncPlayerCountLimit(declaredMax) {
+    const input = document.getElementById('player-count');
+    if (!input) return;
+
+    const parsed = Number(declaredMax);
+    const max = Number.isFinite(parsed) && parsed >= 2
+        ? parsed
+        : (isTeamGame ? currentTeamCount * 8 : 24);
+    input.min = '2';
+    input.max = String(max);
+    const count = clamp(parseInt(input.value, 10) || 3, 2, max);
+    input.value = String(count);
+
+    const existingRows = document.querySelectorAll('.player-row').length;
+    if (existingRows > 0 && existingRows !== count) buildPlayerSlots();
 }
 
 function setText(id, value) {

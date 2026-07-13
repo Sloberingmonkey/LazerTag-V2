@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using LazerTagWebServer.Security;
 using LazerTagWebServer.Services;
 using Microsoft.AspNetCore.SignalR;
 
@@ -10,12 +11,18 @@ namespace LazerTagWebServer.Hubs;
 /// </summary>
 public class GameHub : Hub
 {
+    public const string OperatorsGroup = "operators";
     private static readonly ConcurrentDictionary<string, byte> ActiveConnections = new();
     private readonly HostGunService _service;
+    private readonly OperatorSessionService _operatorSessions;
 
     public static bool HasClients => !ActiveConnections.IsEmpty;
 
-    public GameHub(HostGunService service) => _service = service;
+    public GameHub(HostGunService service, OperatorSessionService operatorSessions)
+    {
+        _service = service;
+        _operatorSessions = operatorSessions;
+    }
 
     public override async Task OnConnectedAsync()
     {
@@ -24,6 +31,12 @@ public class GameHub : Hub
         try
         {
             await base.OnConnectedAsync();
+
+            // State and telemetry drive the public TV. Detailed operational logs are only
+            // delivered to a control console that supplied a valid operator session token.
+            var accessToken = Context.GetHttpContext()?.Request.Query["access_token"].ToString();
+            if (_operatorSessions.IsValid(accessToken))
+                await Groups.AddToGroupAsync(Context.ConnectionId, OperatorsGroup);
 
             // Send current state immediately so the TV/phone shows the right screen on connect.
             await Task.WhenAll(

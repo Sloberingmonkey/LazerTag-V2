@@ -16,9 +16,14 @@
       <span id="title-text">LAZER TAG</span>
     </div>
     <div id="phase-pill" class="phase-pill phase-idle" aria-live="polite">IDLE</div>
-    <div id="relay-badge" class="relay-badge relay-offline" aria-live="polite">
-      <span class="relay-dot-sm" aria-hidden="true"></span>
-      <span id="relay-badge-text">Connecting…</span>
+    <div class="header-status">
+      <div id="relay-badge" class="relay-badge relay-offline" aria-live="polite">
+        <span class="relay-dot-sm" aria-hidden="true"></span>
+        <span id="relay-badge-text">Connecting…</span>
+      </div>
+      <button type="button" id="operator-button" class="operator-badge operator-locked" onclick="toggleOperatorAccess()" aria-label="Unlock operator controls">
+        <span aria-hidden="true">●</span><span id="operator-button-text">Operator locked</span>
+      </button>
     </div>
   </header>
 
@@ -30,7 +35,7 @@
       <span class="action-icon" aria-hidden="true">⏱</span><span>Countdown</span>
     </button>
     <button type="button" id="btn-end" class="action-btn action-red" onclick="endGame()">
-      <span class="action-icon" aria-hidden="true">■</span><span>End Game</span>
+      <span class="action-icon" aria-hidden="true">■</span><span id="end-action-label">End Game</span>
     </button>
     <button type="button" id="btn-next" class="action-btn action-muted" onclick="nextStep()">
       <span class="action-icon" aria-hidden="true">↻</span><span>New Game</span>
@@ -121,7 +126,7 @@
         </div>
         <div class="inline-row">
           <label class="sr-only" for="player-count">Player count</label>
-          <input type="number" id="player-count" min="1" max="24" value="3" class="count-input" inputmode="numeric">
+          <input type="number" id="player-count" min="2" max="24" value="3" class="count-input" inputmode="numeric">
           <button type="button" class="pill-btn" onclick="buildPlayerSlots()">Update</button>
         </div>
       </div>
@@ -195,6 +200,22 @@
 </main>
 
 <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+<div id="login-dialog" class="dialog-overlay auth-overlay">
+  <form id="login-form" class="dialog-box auth-box" role="dialog" aria-modal="true" aria-labelledby="login-dialog-title">
+    <div class="auth-mark" aria-hidden="true">⚡</div>
+    <h3 id="login-dialog-title">Operator Access</h3>
+    <p>Enter the arena operator PIN to enable game controls. The TV scoreboard remains available without signing in.</p>
+    <label for="operator-pin">Operator PIN</label>
+    <input type="password" id="operator-pin" class="dialog-input" autocomplete="current-password"
+           inputmode="numeric" minlength="6" maxlength="128" required autofocus>
+    <p id="login-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-buttons">
+      <a href="/tv.html" class="action-btn action-muted auth-tv-link">TV View</a>
+      <button type="submit" id="login-submit" class="action-btn action-green">Unlock Console</button>
+    </div>
+  </form>
+</div>
 
 <div id="preset-dialog" class="dialog-overlay" hidden>
   <div class="dialog-box" role="dialog" aria-modal="true" aria-labelledby="preset-dialog-title">

@@ -46,65 +46,33 @@
       "presentation": { "reveal": "always", "panel": "shared" }
     },
     {
-      "label": "Stop Pi Server",
+      "label": "Deploy Web Server to Pi",
       "type": "shell",
-      "dependsOn": "Publish for Pi",
-      "command": "ssh",
+      "command": "powershell",
       "args": [
-        "pi@192.168.0.169",
-        "sudo systemctl stop lazertag && echo Stopped"
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/../deployment/deploy-from-vscode.ps1",
+        "-PiTarget",
+        "${input:piTarget}"
       ],
-      "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "shared" }
-    },
+      "problemMatcher": "$msCompile",
+      "presentation": {
+        "reveal": "always",
+        "focus": true,
+        "panel": "dedicated",
+        "clear": true
+      }
+    }
+  ],
+  "inputs": [
     {
-      "label": "Copy to Pi",
-      "type": "shell",
-      "dependsOn": "Stop Pi Server",
-      "command": "scp",
-      "args": [
-        "-r",
-        "${workspaceFolder}/publish/.",
-        "pi@192.168.0.169:/home/pi/lazertag/"
-      ],
-      "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "shared" }
-    },
-    {
-      "label": "Copy deployment files to Pi",
-      "type": "shell",
-      "dependsOn": "Copy to Pi",
-      "command": "scp",
-      "args": [
-        "${workspaceFolder}/../deployment/lazertag.service",
-        "${workspaceFolder}/../deployment/xinitrc",
-        "pi@192.168.0.169:/home/pi/lazertag/"
-      ],
-      "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "shared" }
-    },
-    {
-      "label": "Deploy to Pi",
-      "type": "shell",
-      "dependsOn": "Copy deployment files to Pi",
-      "command": "ssh",
-      "args": [
-        "pi@192.168.0.169",
-        "chmod +x /home/pi/lazertag/LazerTagWebServer && sudo systemctl restart lazertag && echo Done"
-      ],
-      "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "shared" }
-    },
-    {
-      "label": "Restart Pi Server",
-      "type": "shell",
-      "command": "ssh",
-      "args": [
-        "pi@192.168.0.169",
-        "sudo systemctl restart lazertag && echo Restarted"
-      ],
-      "problemMatcher": [],
-      "presentation": { "reveal": "always", "panel": "shared" }
+      "id": "piTarget",
+      "type": "promptString",
+      "description": "Pi SSH target (username@address)",
+      "default": "arenaadmin@192.168.1.50"
     }
   ]
 }

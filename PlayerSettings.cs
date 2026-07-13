@@ -1,18 +1,32 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Globalization;
 
 namespace LazerTagWebServer;
 
 /// <summary>
 /// Persists the player setup grid between sessions.
-/// Saves to players.json next to the app binary on game start, loads on startup.
+/// Saves to players.json in the configured arena data directory.
 /// </summary>
 public static class PlayerSettings
 {
     private const int MaxPlayers = 24;
+    private const int MinPlayers = 2;
     private static readonly object FileGate = new();
-    private static readonly string FilePath = Path.Combine(AppContext.BaseDirectory, "players.json");
-    private static readonly string TempFilePath = FilePath + ".tmp";
+    private static string _filePath = Path.Combine(AppContext.BaseDirectory, "players.json");
+    private static string TempFilePath => _filePath + ".tmp";
+
+    public static void ConfigureDataDirectory(string? dataDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(dataDirectory)) return;
+
+        lock (FileGate)
+        {
+            var fullPath = Path.GetFullPath(dataDirectory);
+            Directory.CreateDirectory(fullPath);
+            _filePath = Path.Combine(fullPath, "players.json");
+        }
+    }
 
     public class PlayerRow
     {
@@ -42,14 +56,14 @@ public static class PlayerSettings
                 var normalizedRows = rows.Take(MaxPlayers).Select(Normalize).ToList();
                 var data = new SaveData
                 {
-                    PlayerCount = Math.Clamp(playerCount, 1, MaxPlayers),
+                    PlayerCount = Math.Clamp(playerCount, MinPlayers, MaxPlayers),
                     Rows = normalizedRows,
                 };
 
                 // Write beside the destination and replace it atomically. A power loss or process
                 // stop during serialization can no longer leave a half-written players.json file.
                 File.WriteAllText(TempFilePath, JsonSerializer.Serialize(data));
-                File.Move(TempFilePath, FilePath, overwrite: true);
+                File.Move(TempFilePath, _filePath, overwrite: true);
             }
             catch (Exception ex)
             {
@@ -68,10 +82,10 @@ public static class PlayerSettings
 
             try
             {
-                if (!File.Exists(FilePath)) return false;
+                if (!File.Exists(_filePath)) return false;
 
-                var data = JsonSerializer.Deserialize<SaveData>(File.ReadAllText(FilePath));
-                if (data == null || data.PlayerCount is < 1 or > MaxPlayers) return false;
+                var data = JsonSerializer.Deserialize<SaveData>(File.ReadAllText(_filePath));
+                if (data == null || data.PlayerCount is < MinPlayers or > MaxPlayers) return false;
 
                 playerCount = data.PlayerCount;
                 rows = (data.Rows ?? []).Take(MaxPlayers).Select(Normalize).ToList();
@@ -88,14 +102,25 @@ public static class PlayerSettings
     private static PlayerRow Normalize(PlayerRow? row)
     {
         row ??= new PlayerRow();
-        row.Name           = (row.Name ?? "").Trim();
-        row.TeamPreference = string.IsNullOrWhiteSpace(row.TeamPreference) ? "Auto" : row.TeamPreference.Trim();
-        row.Hp             = (row.Hp ?? "").Trim();
-        row.Shields        = (row.Shields ?? "").Trim();
-        row.Reloads        = (row.Reloads ?? "").Trim();
-        row.Ammo           = (row.Ammo ?? "").Trim();
-        row.SleepTimeout   = (row.SleepTimeout ?? "").Trim();
+        row.Name = (row.Name ?? "").Trim();
+        if (row.Name.Length > 40) row.Name = row.Name[..40];
+
+        var team = (row.TeamPreference ?? "").Trim();
+        row.TeamPreference = team is "Team 1" or "Team 2" or "Team 3" ? team : "Auto";
+        row.Hp           = NormalizeNumber(row.Hp, 1, 254);
+        row.Shields      = NormalizeNumber(row.Shields, 0, 254);
+        row.Reloads      = NormalizeNumber(row.Reloads, 0, 99);
+        row.Ammo         = NormalizeNumber(row.Ammo, 0, 254);
+        row.SleepTimeout = NormalizeNumber(row.SleepTimeout, 0, 99);
         return row;
+    }
+
+    private static string NormalizeNumber(string? value, int min, int max)
+    {
+        return int.TryParse(value?.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out int parsed)
+               && parsed >= min && parsed <= max
+            ? parsed.ToString(CultureInfo.InvariantCulture)
+            : "";
     }
 
     private static void TryDeleteTempFile()
