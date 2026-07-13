@@ -1,0 +1,54 @@
+[Unit]
+Description=LTAR arena game server
+Documentation=file:/usr/local/share/doc/lazertag/PI_SETUP.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=lazertag
+Group=lazertag
+WorkingDirectory=/opt/lazertag/current
+EnvironmentFile=/etc/lazertag/lazertag.env
+ExecStart=/opt/lazertag/current/LazerTagWebServer
+ExecStartPost=/usr/local/libexec/lazertag/health-check --wait 45 --quiet
+
+Restart=on-failure
+RestartSec=3
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillSignal=SIGINT
+SuccessExitStatus=0 130 143
+
+# The application writes only to StateDirectory. Releases and configuration stay
+# read-only. MemoryDenyWriteExecute must remain false because the .NET JIT creates
+# executable code pages at runtime.
+StateDirectory=lazertag
+StateDirectoryMode=0750
+UMask=0027
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectHostname=true
+ProtectClock=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/lazertag
+MemoryDenyWriteExecute=false
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target

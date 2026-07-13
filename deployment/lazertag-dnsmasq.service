@@ -1,0 +1,36 @@
+[Unit]
+Description=LTAR arena DHCP and local DNS
+Documentation=man:dnsmasq(8)
+Requires=lazertag-hotspot.service lazertag-hostapd.service
+After=lazertag-hotspot.service lazertag-hostapd.service
+Before=lazertag.service
+ConditionFileNotEmpty=/etc/lazertag/dnsmasq.conf
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/dnsmasq --test --conf-file=/etc/lazertag/dnsmasq.conf
+ExecStart=/usr/sbin/dnsmasq --keep-in-foreground --pid-file= --conf-file=/etc/lazertag/dnsmasq.conf --user=lazertag-dnsmasq --group=lazertag-dnsmasq
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=20
+UMask=0077
+StateDirectory=lazertag-dnsmasq
+StateDirectoryMode=0750
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+# StateDirectory creates and repairs a root-owned writable lease directory even
+# with ProtectSystem=strict. dnsmasq opens it before dropping privileges, so the
+# broad CAP_DAC_OVERRIDE capability is intentionally unnecessary here.
+CapabilityBoundingSet=CAP_CHOWN CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETUID
+AmbientCapabilities=CAP_CHOWN CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW CAP_SETGID CAP_SETUID
+
+[Install]
+WantedBy=multi-user.target

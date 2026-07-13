@@ -1,0 +1,24 @@
+[Unit]
+Description=LTAR arena hotspot isolation firewall
+After=lazertag-hotspot.service
+Before=lazertag-hostapd.service lazertag.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/lazertag/firewall-apply
+ExecReload=/usr/local/libexec/lazertag/firewall-apply
+RemainAfterExit=yes
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=false
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

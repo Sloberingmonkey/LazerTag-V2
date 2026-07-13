@@ -1,0 +1,32 @@
+[Unit]
+Description=LTAR WPA2 arena access point
+Documentation=man:hostapd(8)
+Requires=lazertag-hotspot.service lazertag-firewall.service
+After=lazertag-hotspot.service lazertag-firewall.service
+Before=lazertag-dnsmasq.service lazertag.service
+ConditionFileNotEmpty=/etc/lazertag/hostapd.conf
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/hostapd /etc/lazertag/hostapd.conf
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=20
+RuntimeDirectory=lazertag-hostapd
+RuntimeDirectoryMode=0750
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK AF_PACKET
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

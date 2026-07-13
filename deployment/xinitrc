@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+# Optional local-TV session. Run this as a non-privileged kiosk account through
+# startx; the web server itself remains the separate lazertag system service.
+
+xset s off
+xset s noblank
+xset -dpms
+
+if command -v unclutter >/dev/null 2>&1; then
+    unclutter -idle 1 -root &
+fi
+
+if command -v chromium >/dev/null 2>&1; then
+    BROWSER=chromium
+elif command -v chromium-browser >/dev/null 2>&1; then
+    BROWSER=chromium-browser
+else
+    printf 'Chromium is not installed.\n' >&2
+    exit 1
+fi
+
+until curl --fail --silent --max-time 3 http://127.0.0.1:5000/healthz >/dev/null; do
+    sleep 1
+done
+
+mkdir -p "${HOME}/.config/lazertag-chromium"
+
+exec "${BROWSER}" \
+    --kiosk \
+    --no-first-run \
+    --no-default-browser-check \
+    --noerrdialogs \
+    --disable-session-crashed-bubble \
+    --disable-restore-session-state \
+    --disable-component-update \
+    --disable-features=Translate \
+    --password-store=basic \
+    --autoplay-policy=no-user-gesture-required \
+    --user-data-dir="${HOME}/.config/lazertag-chromium" \
+    http://127.0.0.1:5000/tv.html

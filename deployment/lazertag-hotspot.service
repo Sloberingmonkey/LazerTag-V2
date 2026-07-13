@@ -1,0 +1,27 @@
+[Unit]
+Description=LTAR arena hotspot interface
+Wants=NetworkManager.service
+After=NetworkManager.service systemd-rfkill.service
+Before=lazertag-hostapd.service lazertag-dnsmasq.service lazertag-firewall.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/lazertag/hotspot-interface up
+ExecReload=/usr/local/libexec/lazertag/hotspot-interface up
+ExecStop=/usr/local/libexec/lazertag/hotspot-interface down
+RemainAfterExit=yes
+TimeoutStartSec=20
+TimeoutStopSec=10
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+
+[Install]
+WantedBy=multi-user.target

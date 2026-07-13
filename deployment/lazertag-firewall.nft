@@ -1,0 +1,21 @@
+# Loaded into an isolated table by firewall-apply.sh. The dedicated dnsmasq
+# instance supplies DHCP/DNS, while arena guests cannot route into an upstream
+# business/admin network or reach unrelated services on the Pi.
+table inet lazertag {
+    chain hotspot_input {
+        type filter hook input priority -10; policy accept;
+
+        iifname "wlan0" ct state established,related accept
+        iifname "wlan0" ip protocol icmp accept
+        iifname "wlan0" udp dport { 53, 67 } accept
+        iifname "wlan0" tcp dport { 53, 5000 } accept
+        iifname "wlan0" drop
+    }
+
+    chain hotspot_forward {
+        type filter hook forward priority -10; policy accept;
+
+        iifname "wlan0" drop
+        oifname "wlan0" drop
+    }
+}
