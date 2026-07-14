@@ -1,8 +1,9 @@
 #!/bin/sh
 set -eu
 
-# Optional local-TV session. Run this as a non-privileged kiosk account through
-# startx; the web server itself remains the separate lazertag system service.
+# Full-screen local TV kiosk for the LazerTag scoreboard.
+# Explicit geometry avoids Chromium opening in a smaller default window
+# when X is running without a window manager.
 
 xset s off
 xset s noblank
@@ -21,14 +22,57 @@ else
     exit 1
 fi
 
-until curl --fail --silent --max-time 3 http://127.0.0.1:5000/healthz >/dev/null; do
+OUTPUT="$(xrandr --query | awk '/ connected/{print $1; exit}')"
+
+# Prefer the arena's intended 1280x720 TV mode when the display advertises it.
+if xrandr --query | grep -q '1280x720'; then
+    MODE="1280x720"
+else
+    MODE="$(xrandr --query | awk '/\*/{print $1; exit}')"
+fi
+
+if [ -n "${OUTPUT}" ] && [ -n "${MODE}" ]; then
+    xrandr --output "${OUTPUT}" \
+        --primary \
+        --mode "${MODE}" \
+        --pos 0x0 \
+        --rotate normal
+fi
+
+GEOMETRY="$(xrandr --current | awk '/current/ {
+    for (i = 1; i <= NF; i++) {
+        if ($i == "current") {
+            width = $(i + 1)
+            height = $(i + 3)
+            gsub(",", "", width)
+            gsub(",", "", height)
+            print width "x" height
+            exit
+        }
+    }
+}')"
+
+if [ -z "${GEOMETRY}" ]; then
+    GEOMETRY="${MODE:-1280x720}"
+fi
+
+WIDTH="${GEOMETRY%x*}"
+HEIGHT="${GEOMETRY#*x}"
+
+until curl --fail --silent --max-time 3 \
+    http://127.0.0.1:5000/healthz >/dev/null; do
     sleep 1
 done
 
-mkdir -p "${HOME}/.config/lazertag-chromium"
+PROFILE="${HOME}/.config/lazertag-chromium"
+mkdir -p "${PROFILE}"
 
 exec "${BROWSER}" \
     --kiosk \
+    --start-fullscreen \
+    --window-position=0,0 \
+    --window-size="${WIDTH},${HEIGHT}" \
+    --force-device-scale-factor=1 \
     --no-first-run \
     --no-default-browser-check \
     --noerrdialogs \
@@ -38,5 +82,5 @@ exec "${BROWSER}" \
     --disable-features=Translate \
     --password-store=basic \
     --autoplay-policy=no-user-gesture-required \
-    --user-data-dir="${HOME}/.config/lazertag-chromium" \
+    --user-data-dir="${PROFILE}" \
     http://127.0.0.1:5000/tv.html
