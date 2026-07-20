@@ -32,8 +32,9 @@
   }
 
   #header {
+    width: 100%;
     height: 64px;
-    padding: 0 64px;
+    padding: 0 88px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -45,7 +46,13 @@
   #header-status.playing { color: var(--green); }
   #header-status.countdown { color: var(--amber); }
 
-  #main { height: calc(100vh - 64px); display: flex; align-items: center; justify-content: center; }
+  #main {
+    width: 100%;
+    height: calc(100vh - 64px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
   .phase { display: none; width: 100%; height: 100%; }
   .phase.active { display: flex; }
 
@@ -56,7 +63,7 @@
   .relay-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); box-shadow: 0 0 10px rgba(255,93,115,.35); }
   .relay-dot.on { background: var(--green); box-shadow: 0 0 10px rgba(50,219,136,.5); }
 
-  #phase-lobby { flex-direction: column; align-items: center; justify-content: center; padding: 28px 40px; }
+  #phase-lobby { flex-direction: column; align-items: center; justify-content: center; padding: 28px 88px; }
   #lobby-headline { font-size: clamp(38px, 4vw, 52px); font-weight: 950; color: var(--accent); letter-spacing: .08em; margin-bottom: 14px; }
   #lobby-next { min-height: 32px; margin-bottom: 34px; font-size: 22px; color: var(--amber); font-weight: 750; }
   #lobby-players { width: 100%; max-width: 1120px; display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
@@ -81,7 +88,7 @@
   }
   #countdown-number.urgent { color: var(--red); }
 
-  #phase-playing { flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 40px; }
+  #phase-playing { flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 88px; }
   #playing-label { font-size: 26px; font-weight: 800; color: var(--green); letter-spacing: .15em; }
   #playing-clock { font-size: clamp(112px, 13vw, 164px); font-weight: 950; line-height: .95; letter-spacing: .03em; }
   #playing-clock.urgent { color: var(--red); }
@@ -91,7 +98,7 @@
   .playing-card-score { font-size: 13px; color: var(--muted); }
   .playing-card-score span { color: var(--accent); font-weight: 800; }
 
-  #phase-debrief { flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding: 28px 40px; }
+  #phase-debrief { flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding: 28px 88px; }
   #debrief-title { font-size: 44px; font-weight: 950; color: var(--accent); letter-spacing: .1em; }
   #debrief-subtitle { font-size: 20px; color: var(--muted); }
   #debrief-players { max-width: 1120px; display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
@@ -103,16 +110,35 @@
   .debrief-card.done .debrief-card-status { color: var(--green); }
   .debrief-card.waiting .debrief-card-status { color: var(--amber); }
 
-  #phase-scores { flex-direction: column; align-items: center; justify-content: flex-start; gap: 14px; padding: 18px 64px 22px; }
+  #phase-scores {
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 24px 88px 28px;
+  }
   #scores-title { flex: 0 0 auto; font-size: 36px; font-weight: 950; color: var(--gold); letter-spacing: .1em; }
+  #scores-title.incomplete { color: var(--amber); }
+  #scores-subtitle {
+    display: none;
+    flex: 0 0 auto;
+    max-width: 900px;
+    text-align: center;
+    font-size: 15px;
+    font-weight: 750;
+    color: var(--amber);
+  }
+  #scores-subtitle.active { display: block; }
   #scores-list { width: 100%; max-width: 1180px; min-height: 0; flex: 1 1 auto; overflow: hidden; }
   .team-banner { display: flex; gap: 12px; justify-content: center; margin-bottom: 12px; }
   .team-chip { min-width: 150px; padding: 8px 20px; text-align: center; background: var(--panel); border: 2px solid #444; border-radius: 10px; }
   .team-chip.winner { background: rgba(255,215,94,.08); }
   .team-chip-name { display: block; font-size: 14px; font-weight: 800; letter-spacing: .05em; }
   .team-chip-score { display: block; margin: 2px 0; font-size: 27px; font-weight: 950; }
+  .team-chip-detail { display: block; min-height: 14px; font-size: 10px; color: var(--muted); letter-spacing: .04em; }
   .team-chip-badge { display: block; min-height: 16px; font-size: 11px; color: var(--gold); font-weight: 800; }
-  .team-columns { display: grid; gap: 12px; height: calc(100% - 86px); }
+  .team-columns { display: grid; gap: 12px; height: calc(100% - 100px); }
+  #scores-list.incomplete .team-columns { height: calc(100% - 116px); }
   .team-columns.teams-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .team-columns.teams-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .team-score-panel { min-width: 0; padding: 10px; background: rgba(12,18,32,.58); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -123,7 +149,7 @@
   .solo-score-list.compact .score-row { padding-block: 8px; }
   .score-row {
     display: grid;
-    grid-template-columns: 58px minmax(0, 1fr) 118px 118px;
+    grid-template-columns: 58px minmax(0, 1fr) 118px 100px 100px;
     align-items: center;
     gap: 12px;
     min-height: 57px;
@@ -132,7 +158,7 @@
     border: 1px solid var(--border);
     border-radius: 9px;
   }
-  .team-score-panel .score-row { grid-template-columns: 42px minmax(0, 1fr) 80px 80px; gap: 8px; min-height: 50px; padding: 8px 10px; }
+  .team-score-panel .score-row { grid-template-columns: 42px minmax(0, 1fr) 68px 60px 60px; gap: 8px; min-height: 50px; padding: 8px 10px; }
   .score-row.rank-1 { border-color: var(--gold); background: rgba(255,215,94,.07); }
   .score-row.rank-2 { border-color: #8895aa; }
   .score-row.rank-3 { border-color: #b87333; }
@@ -148,18 +174,85 @@
   .team-score-panel .score-num { font-size: 18px; }
   .score-lbl { display: block; margin-top: 1px; font-size: 9px; color: var(--muted); letter-spacing: .04em; }
   .team-score-panel .score-lbl { font-size: 8px; }
+  .score-num.points { color: var(--gold); }
+  .score-num.unavailable { color: var(--muted); }
   .score-num.green { color: var(--green); }
   .score-num.red { color: var(--red); }
 
+  #relay-alert {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 1100;
+    min-height: 64px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 9px 40px;
+    text-align: center;
+    background: rgba(116,14,29,.97);
+    border-bottom: 2px solid var(--red);
+    color: #fff;
+    font-size: 16px;
+    font-weight: 850;
+    letter-spacing: .035em;
+    box-shadow: 0 8px 26px rgba(0,0,0,.48);
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-110%);
+    transition: opacity .2s ease, visibility .2s ease, transform .2s ease;
+    pointer-events: none;
+  }
+  #relay-alert.active { opacity: 1; visibility: visible; transform: translateY(0); }
+  #relay-alert strong { color: #fff; letter-spacing: .09em; }
+  #relay-alert span { color: #ffdce1; }
+
+  #connection-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    background: rgba(5,7,15,.72);
+    backdrop-filter: blur(3px);
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transition: opacity .2s ease, visibility .2s ease;
+  }
+  #connection-overlay.active { opacity: 1; visibility: visible; }
+  #connection-card {
+    min-width: min(520px, 88vw);
+    padding: 30px 42px;
+    text-align: center;
+    background: rgba(12,18,32,.96);
+    border: 3px solid var(--amber);
+    border-radius: 16px;
+    box-shadow: 0 18px 70px rgba(0,0,0,.65), 0 0 26px rgba(255,189,71,.2);
+  }
+  #connection-symbol { margin-bottom: 8px; font-size: 42px; color: var(--amber); }
+  #connection-title { font-size: 30px; font-weight: 950; color: var(--amber); letter-spacing: .08em; }
+  #connection-detail { margin-top: 10px; font-size: 17px; color: var(--text); }
+  #connection-last-update { margin-top: 7px; font-size: 13px; color: var(--muted); }
+
   @media (max-width: 900px), (max-height: 600px) {
-    #header { height: 54px; padding-inline: 24px; }
+    #header { height: 54px; padding-inline: 40px; }
     #main { height: calc(100vh - 54px); }
-    #phase-scores { padding: 12px 48px 16px; gap: 9px; }
+    #relay-alert { min-height: 54px; padding-block: 7px; font-size: 14px; }
+    #phase-lobby,
+    #phase-playing,
+    #phase-debrief { padding-inline: 40px; }
+    #phase-scores { padding: 12px 40px 16px; gap: 9px; }
     #scores-title { font-size: 30px; }
     .team-banner { margin-bottom: 8px; }
     .team-chip { padding: 5px 14px; }
     .team-chip-score { font-size: 22px; }
-    .team-columns { height: calc(100% - 70px); }
+    .team-columns { height: calc(100% - 84px); }
+    #scores-list.incomplete .team-columns { height: calc(100% - 100px); }
   }
 </style>
 </head>
@@ -204,9 +297,24 @@
 
   <section class="phase" id="phase-scores">
     <div id="scores-title">GAME OVER</div>
+    <div id="scores-subtitle"></div>
     <div id="scores-list"></div>
   </section>
 </main>
+
+<div id="relay-alert" role="alert" aria-live="assertive" aria-hidden="true">
+  <strong>RELAY OFFLINE</strong>
+  <span>Tagger commands and reports are unavailable.</span>
+</div>
+
+<div id="connection-overlay" role="status" aria-live="polite" aria-hidden="true">
+  <div id="connection-card">
+    <div id="connection-symbol" aria-hidden="true">&#9888;</div>
+    <div id="connection-title">SCOREBOARD OFFLINE</div>
+    <div id="connection-detail">No game-state updates are reaching this display.</div>
+    <div id="connection-last-update">Keeping the last game state on screen.</div>
+  </div>
+</div>
 
 <script src="/js/signalr.min.js"></script>
 <script>
@@ -224,6 +332,12 @@ let timerId = null;
 let signalRStarting = false;
 let retryTimer = null;
 let refreshTimer = null;
+let connectionWatchdogTimer = null;
+let relayAlertTimer = null;
+let lastRelayConnected = null;
+let lastStateUpdateMs = Date.now();
+const stateStaleAfterMs = 14000;
+const relayOfflineGraceMs = 4000;
 const playingCards = new Map();
 
 connection.on('State', snapshot => applyState(snapshot));
@@ -232,6 +346,7 @@ connection.onreconnected(refreshSnapshots);
 connection.onclose(scheduleSignalRStart);
 
 window.addEventListener('DOMContentLoaded', async () => {
+    connectionWatchdogTimer = window.setInterval(updateConnectionOverlay, 1000);
     await refreshSnapshots();
     await startSignalR();
     refreshTimer = window.setInterval(refreshSnapshots, 5000);
@@ -241,6 +356,8 @@ window.addEventListener('beforeunload', () => {
     stopTimer();
     if (refreshTimer) window.clearInterval(refreshTimer);
     if (retryTimer) window.clearTimeout(retryTimer);
+    if (connectionWatchdogTimer) window.clearInterval(connectionWatchdogTimer);
+    if (relayAlertTimer) window.clearTimeout(relayAlertTimer);
 });
 
 async function fetchJson(url) {
@@ -334,6 +451,9 @@ function serverOffset(startedAtMs, serverNowMs, totalSeconds) {
 }
 
 function applyState(snapshot) {
+    if (!snapshot || typeof snapshot !== 'object') return;
+    markStateUpdate();
+
     const state = String(snapshot.hostingState || 'Idle').toLowerCase();
     const players = snapshot.players || [];
     const status = document.getElementById('header-status');
@@ -391,7 +511,11 @@ function applyState(snapshot) {
     if (state === 'gameover') {
         stopTimer();
         showPhase('scores');
-        renderScores(players, Boolean(snapshot.isTeamGame));
+        renderScores(
+            players,
+            Boolean(snapshot.isTeamGame),
+            snapshot.teams,
+            snapshot.resultsFinalized !== false);
         return;
     }
 
@@ -400,9 +524,36 @@ function applyState(snapshot) {
 }
 
 function applyTelemetry(telemetry) {
-    const online = Boolean(telemetry?.relayConnected);
+    if (typeof telemetry?.relayConnected !== 'boolean') return;
+
+    const online = telemetry.relayConnected;
+    lastRelayConnected = online;
     document.getElementById('relay-dot').classList.toggle('on', online);
+    updateRelayAlert(online);
     document.getElementById('relay-text').textContent = online ? 'Relay: connected' : 'Relay: connecting…';
+}
+
+function updateRelayAlert(online) {
+    if (online) {
+        if (relayAlertTimer) window.clearTimeout(relayAlertTimer);
+        relayAlertTimer = null;
+        setRelayAlert(false);
+        return;
+    }
+
+    const alert = document.getElementById('relay-alert');
+    if (relayAlertTimer || alert?.classList.contains('active')) return;
+    relayAlertTimer = window.setTimeout(() => {
+        relayAlertTimer = null;
+        if (lastRelayConnected === false) setRelayAlert(true);
+    }, relayOfflineGraceMs);
+}
+
+function setRelayAlert(show) {
+    const alert = document.getElementById('relay-alert');
+    if (!alert) return;
+    alert.classList.toggle('active', show);
+    alert.setAttribute('aria-hidden', String(!show));
 }
 
 function renderLobby(snapshot, players) {
@@ -464,16 +615,30 @@ function renderDebrief(players) {
       </article>`).join('');
 }
 
-function renderScores(players, isTeamGame) {
+function renderScores(players, isTeamGame, authoritativeTeams, resultsFinalized) {
     const list = document.getElementById('scores-list');
+    const finalized = resultsFinalized !== false;
+    const title = document.getElementById('scores-title');
+    const subtitle = document.getElementById('scores-subtitle');
+
+    title.textContent = finalized ? 'GAME OVER' : 'INCOMPLETE RESULTS';
+    title.classList.toggle('incomplete', !finalized);
+    subtitle.textContent = finalized
+        ? ''
+        : 'The game ended before complete reports were received. Scores and winners are unavailable; hit totals may be partial.';
+    subtitle.classList.toggle('active', !finalized);
+    list.classList.toggle('incomplete', !finalized);
     list.innerHTML = '';
-    if (!players.length) return;
 
     if (!isTeamGame) {
-        const ranked = sortPlayers(players);
+        if (!players.length) return;
+        const ranked = finalized
+            ? rankPlayers(players)
+            : players.map(player => ({ player, rank: null }));
         const solo = document.createElement('div');
         solo.className = `solo-score-list${ranked.length > 7 ? ' compact' : ''}`;
-        ranked.forEach((player, index) => solo.appendChild(makePlayerRow(player, index + 1, false)));
+        ranked.forEach(result =>
+            solo.appendChild(makePlayerRow(result.player, result.rank, false, finalized)));
         list.appendChild(solo);
         return;
     }
@@ -481,18 +646,65 @@ function renderScores(players, isTeamGame) {
     const teamTotals = new Map();
     players.forEach(player => {
         const team = Number(player.team) || 0;
-        const current = teamTotals.get(team) || { shots: 0, score: 0 };
-        current.shots += hits(player.hitsScored);
-        current.score += Number(player.score) || 0;
+        const current = teamTotals.get(team) || {
+            score: 0,
+            calculatedScore: 0,
+            rank: null,
+            hitsScored: 0,
+            hitsTaken: 0,
+        };
+        current.calculatedScore += score(player.score);
+        current.score = current.calculatedScore;
+        current.hitsScored += hits(player.hitsScored);
+        current.hitsTaken += hits(player.hitsTaken);
         teamTotals.set(team, current);
     });
 
+    if (Array.isArray(authoritativeTeams)) {
+        authoritativeTeams.forEach(result => {
+            const team = Number(result?.number ?? result?.team);
+            if (!Number.isInteger(team)) return;
+
+            const current = teamTotals.get(team) || {
+                score: 0,
+                calculatedScore: 0,
+                rank: null,
+                hitsScored: 0,
+                hitsTaken: 0,
+            };
+            const authoritativeScore = Number(result?.score);
+            const authoritativeRank = Number(result?.rank);
+            if (Number.isFinite(authoritativeScore)) current.score = authoritativeScore;
+            if (Number.isInteger(authoritativeRank) && authoritativeRank > 0) current.rank = authoritativeRank;
+            teamTotals.set(team, current);
+        });
+    }
+
+    if (!teamTotals.size) return;
+
     const teamOrder = [...teamTotals.keys()].sort((a, b) => {
-        const shotDifference = teamTotals.get(b).shots - teamTotals.get(a).shots;
-        return shotDifference || teamTotals.get(b).score - teamTotals.get(a).score;
+        if (!finalized) return a - b;
+
+        const teamA = teamTotals.get(a);
+        const teamB = teamTotals.get(b);
+        if (teamA.rank !== null || teamB.rank !== null) {
+            if (teamA.rank === null) return 1;
+            if (teamB.rank === null) return -1;
+            if (teamA.rank !== teamB.rank) return teamA.rank - teamB.rank;
+        }
+        return teamB.score - teamA.score ||
+            teamB.hitsScored - teamA.hitsScored ||
+            teamA.hitsTaken - teamB.hitsTaken ||
+            a - b;
     });
-    const bestShots = teamTotals.get(teamOrder[0]).shots;
-    const winners = teamOrder.filter(team => teamTotals.get(team).shots === bestShots);
+    const hasCompleteRanks = finalized && teamOrder.every(team => teamTotals.get(team).rank !== null);
+    const bestRank = hasCompleteRanks ? teamTotals.get(teamOrder[0]).rank : null;
+    const bestScore = finalized ? teamTotals.get(teamOrder[0]).score : null;
+    const winners = !finalized
+        ? []
+        : hasCompleteRanks
+            ? teamOrder.filter(team => teamTotals.get(team).rank === bestRank)
+            : teamOrder.filter(team => teamTotals.get(team).score === bestScore);
 
     const banner = document.createElement('div');
     banner.className = 'team-banner';
@@ -502,7 +714,8 @@ function renderScores(players, isTeamGame) {
         const color = teamColor(team);
         return `<div class="team-chip${winner ? ' winner' : ''}" style="border-color:${color}">
           <span class="team-chip-name" style="color:${color}">${teamName(team)}</span>
-          <span class="team-chip-score">${totals.shots} shots</span>
+          <span class="team-chip-score">${finalized ? `${totals.score} pts` : '&mdash;'}</span>
+          <span class="team-chip-detail">${totals.hitsScored} hits &middot; ${totals.hitsTaken} taken</span>
           <span class="team-chip-badge">${winner ? (winners.length > 1 ? 'TIE' : '🏆 WIN') : '&nbsp;'}</span>
         </div>`;
     }).join('');
@@ -515,12 +728,16 @@ function renderScores(players, isTeamGame) {
         const panel = document.createElement('section');
         panel.className = 'team-score-panel';
         const color = teamColor(team);
-        const members = sortPlayers(players.filter(player => Number(player.team) === team));
+        const teamPlayers = players.filter(player => Number(player.team) === team);
+        const members = finalized
+            ? rankPlayers(teamPlayers)
+            : teamPlayers.map(player => ({ player, rank: null }));
         panel.innerHTML = `<div class="team-section-header" style="color:${color};border-color:${color}">${teamName(team)}</div>`;
 
         const memberList = document.createElement('div');
         memberList.className = 'team-player-list';
-        members.forEach((player, index) => memberList.appendChild(makePlayerRow(player, index + 1, true)));
+        members.forEach(result =>
+            memberList.appendChild(makePlayerRow(result.player, result.rank, true, finalized)));
         panel.appendChild(memberList);
         columns.appendChild(panel);
     });
@@ -528,13 +745,24 @@ function renderScores(players, isTeamGame) {
     list.appendChild(columns);
 }
 
-function makePlayerRow(player, rank, compact) {
+function makePlayerRow(player, rank, compact, resultsFinalized) {
     const labels = ['1ST', '2ND', '3RD'];
+    const finalized = resultsFinalized !== false;
+    const displayRank = finalized && Number.isInteger(rank) && rank > 0 ? rank : null;
+    const rankLabel = displayRank === null
+        ? '&mdash;'
+        : displayRank <= 3 ? labels[displayRank - 1] : displayRank;
     const row = document.createElement('div');
-    row.className = `score-row rank-${Math.min(rank, 4)}`;
+    row.className = displayRank === null
+        ? 'score-row'
+        : `score-row rank-${Math.min(displayRank, 4)}`;
     row.innerHTML = `
-      <div class="score-rank${rank > 3 ? ' other' : ''}">${rank <= 3 ? labels[rank - 1] : rank}</div>
+      <div class="score-rank${displayRank === null || displayRank > 3 ? ' other' : ''}">${rankLabel}</div>
       <div class="score-name">${esc(player.name || player.id)}</div>
+      <div class="score-col">
+        <span class="score-num ${finalized ? 'points' : 'unavailable'}">${finalized ? score(player.score) : '&mdash;'}</span>
+        <span class="score-lbl">${finalized ? (compact ? 'SCORE' : 'TOTAL SCORE') : (compact ? 'NO SCORE' : 'SCORE UNAVAILABLE')}</span>
+      </div>
       <div class="score-col">
         <span class="score-num green">${hits(player.hitsScored)}</span>
         <span class="score-lbl">${compact ? 'LANDED' : 'SHOTS LANDED'}</span>
@@ -546,11 +774,39 @@ function makePlayerRow(player, rank, compact) {
     return row;
 }
 
-function sortPlayers(players) {
-    return [...players].sort((a, b) => {
-        const hitDifference = hits(b.hitsScored) - hits(a.hitsScored);
-        return hitDifference || (Number(b.score) || 0) - (Number(a.score) || 0);
+function rankPlayers(players) {
+    const scoreOrdered = players
+        .map((player, index) => ({ player, index }))
+        .sort((a, b) => comparePlayerResults(a.player, b.player) || a.index - b.index);
+
+    let fallbackRank = 0;
+    let previousScore = null;
+    const ranked = scoreOrdered.map((entry, index) => {
+        const currentScore = score(entry.player.score);
+        if (index === 0 || currentScore !== previousScore) fallbackRank = index + 1;
+        previousScore = currentScore;
+        return {
+            ...entry,
+            rank: playerRank(entry.player) ?? fallbackRank,
+        };
     });
+
+    return ranked
+        .sort((a, b) => a.rank - b.rank || comparePlayerResults(a.player, b.player) || a.index - b.index)
+        .map(entry => ({ player: entry.player, rank: entry.rank }));
+}
+
+function comparePlayerResults(playerA, playerB) {
+    return score(playerB.score) - score(playerA.score) ||
+        hits(playerB.hitsScored) - hits(playerA.hitsScored) ||
+        hits(playerA.hitsTaken) - hits(playerB.hitsTaken) ||
+        String(playerA.name || playerA.id || '').localeCompare(
+            String(playerB.name || playerB.id || ''), undefined, { sensitivity: 'base' });
+}
+
+function playerRank(player) {
+    const rank = Number(player?.rank);
+    return Number.isInteger(rank) && rank > 0 ? rank : null;
 }
 
 function teamColor(team) {
@@ -563,6 +819,33 @@ function teamName(team) {
 
 function hits(raw) {
     return Math.max(0, Math.trunc(Number(raw) || 0));
+}
+
+function score(raw) {
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : 0;
+}
+
+function markStateUpdate() {
+    lastStateUpdateMs = Date.now();
+    setConnectionOverlay(false);
+}
+
+function updateConnectionOverlay() {
+    const elapsedMs = Date.now() - lastStateUpdateMs;
+    if (elapsedMs < stateStaleAfterMs) return;
+
+    const elapsedSeconds = Math.max(1, Math.floor(elapsedMs / 1000));
+    document.getElementById('connection-last-update').textContent =
+        `Last arena update was ${elapsedSeconds} seconds ago. Keeping the last game state on screen.`;
+    setConnectionOverlay(true);
+}
+
+function setConnectionOverlay(show) {
+    const overlay = document.getElementById('connection-overlay');
+    if (!overlay) return;
+    overlay.classList.toggle('active', show);
+    overlay.setAttribute('aria-hidden', String(!show));
 }
 
 function esc(value) {
