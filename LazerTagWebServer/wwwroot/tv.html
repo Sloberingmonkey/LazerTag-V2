@@ -32,8 +32,9 @@
   }
 
   #header {
+    width: 100%;
     height: 64px;
-    padding: 0 64px;
+    padding: 0 88px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -45,7 +46,13 @@
   #header-status.playing { color: var(--green); }
   #header-status.countdown { color: var(--amber); }
 
-  #main { height: calc(100vh - 64px); display: flex; align-items: center; justify-content: center; }
+  #main {
+    width: 100%;
+    height: calc(100vh - 64px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
   .phase { display: none; width: 100%; height: 100%; }
   .phase.active { display: flex; }
 
@@ -56,7 +63,7 @@
   .relay-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--red); box-shadow: 0 0 10px rgba(255,93,115,.35); }
   .relay-dot.on { background: var(--green); box-shadow: 0 0 10px rgba(50,219,136,.5); }
 
-  #phase-lobby { flex-direction: column; align-items: center; justify-content: center; padding: 28px 40px; }
+  #phase-lobby { flex-direction: column; align-items: center; justify-content: center; padding: 28px 88px; }
   #lobby-headline { font-size: clamp(38px, 4vw, 52px); font-weight: 950; color: var(--accent); letter-spacing: .08em; margin-bottom: 14px; }
   #lobby-next { min-height: 32px; margin-bottom: 34px; font-size: 22px; color: var(--amber); font-weight: 750; }
   #lobby-players { width: 100%; max-width: 1120px; display: flex; flex-wrap: wrap; justify-content: center; gap: 14px; }
@@ -81,7 +88,7 @@
   }
   #countdown-number.urgent { color: var(--red); }
 
-  #phase-playing { flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 40px; }
+  #phase-playing { flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 88px; }
   #playing-label { font-size: 26px; font-weight: 800; color: var(--green); letter-spacing: .15em; }
   #playing-clock { font-size: clamp(112px, 13vw, 164px); font-weight: 950; line-height: .95; letter-spacing: .03em; }
   #playing-clock.urgent { color: var(--red); }
@@ -91,7 +98,7 @@
   .playing-card-score { font-size: 13px; color: var(--muted); }
   .playing-card-score span { color: var(--accent); font-weight: 800; }
 
-  #phase-debrief { flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding: 28px 40px; }
+  #phase-debrief { flex-direction: column; align-items: center; justify-content: center; gap: 26px; padding: 28px 88px; }
   #debrief-title { font-size: 44px; font-weight: 950; color: var(--accent); letter-spacing: .1em; }
   #debrief-subtitle { font-size: 20px; color: var(--muted); }
   #debrief-players { max-width: 1120px; display: flex; flex-wrap: wrap; justify-content: center; gap: 16px; }
@@ -103,7 +110,13 @@
   .debrief-card.done .debrief-card-status { color: var(--green); }
   .debrief-card.waiting .debrief-card-status { color: var(--amber); }
 
-  #phase-scores { flex-direction: column; align-items: center; justify-content: flex-start; gap: 14px; padding: 18px 64px 22px; }
+  #phase-scores {
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+    padding: 24px 88px 28px;
+  }
   #scores-title { flex: 0 0 auto; font-size: 36px; font-weight: 950; color: var(--gold); letter-spacing: .1em; }
   #scores-list { width: 100%; max-width: 1180px; min-height: 0; flex: 1 1 auto; overflow: hidden; }
   .team-banner { display: flex; gap: 12px; justify-content: center; margin-bottom: 12px; }
@@ -152,9 +165,12 @@
   .score-num.red { color: var(--red); }
 
   @media (max-width: 900px), (max-height: 600px) {
-    #header { height: 54px; padding-inline: 24px; }
+    #header { height: 54px; padding-inline: 40px; }
     #main { height: calc(100vh - 54px); }
-    #phase-scores { padding: 12px 48px 16px; gap: 9px; }
+    #phase-lobby,
+    #phase-playing,
+    #phase-debrief { padding-inline: 40px; }
+    #phase-scores { padding: 12px 40px 16px; gap: 9px; }
     #scores-title { font-size: 30px; }
     .team-banner { margin-bottom: 8px; }
     .team-chip { padding: 5px 14px; }
