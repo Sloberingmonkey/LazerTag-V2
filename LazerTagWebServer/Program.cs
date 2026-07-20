@@ -2,6 +2,7 @@ using LazerTagWebServer;
 using LazerTagWebServer.Hubs;
 using LazerTagWebServer.Security;
 using LazerTagWebServer.Services;
+using System.Reflection;
 using System.Threading.RateLimiting;
 
 // A systemd service may deliberately use a writable data directory as its
@@ -28,6 +29,7 @@ builder.Services.AddSignalR(options =>
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
 builder.Services.AddSingleton<HostGunService>();
+builder.Services.AddSingleton<GameHistoryStore>();
 builder.Services.AddSingleton<OperatorSessionService>();
 builder.Services.AddRateLimiter(options =>
 {
@@ -117,7 +119,9 @@ app.MapHub<GameHub>("/gamehub");
 app.MapGet("/healthz", (HostGunService service) => Results.Ok(new
 {
     Status = "ok",
-    Version = typeof(Program).Assembly.GetName().Version?.ToString(3) ?? "unknown",
+    Version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+        ?? typeof(Program).Assembly.GetName().Version?.ToString(3)
+        ?? "unknown",
     RelayConnected = service.IsRelayConnected,
     Hosting = service.IsHosting,
     Utc = DateTimeOffset.UtcNow,

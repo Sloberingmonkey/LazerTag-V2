@@ -31,7 +31,8 @@
     <button type="button" id="btn-start" class="action-btn action-green" onclick="startHosting()">
       <span class="action-icon" aria-hidden="true">▶</span><span>Start Hosting</span>
     </button>
-    <button type="button" id="btn-countdown" class="action-btn action-blue" onclick="startCountdown()">
+    <button type="button" id="btn-countdown" class="action-btn action-blue" onclick="startCountdown()"
+            aria-describedby="countdown-action-status">
       <span class="action-icon" aria-hidden="true">⏱</span><span>Countdown</span>
     </button>
     <button type="button" id="btn-end" class="action-btn action-red" onclick="endGame()">
@@ -40,13 +41,18 @@
     <button type="button" id="btn-next" class="action-btn action-muted" onclick="nextStep()">
       <span class="action-icon" aria-hidden="true">↻</span><span>New Game</span>
     </button>
+    <p id="countdown-action-status" class="action-status" aria-live="polite" hidden></p>
   </nav>
 </div>
 
 <main id="main-layout">
   <aside id="setup-panel" aria-label="Game setup">
+    <div id="setup-lock-message" class="setup-lock-banner" role="status" hidden>
+      <strong>Setup locked</strong>
+      <span>Game settings and the roster stay fixed until this session is ended and cleared.</span>
+    </div>
 
-    <section class="card">
+    <section class="card" data-setup-section>
       <div class="section-header">
         <div>
           <h2>Presets</h2>
@@ -59,7 +65,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" data-setup-section>
       <div class="section-heading">
         <h2>Game Type</h2>
         <p class="section-subtitle">Choose the rules used by every tagger.</p>
@@ -68,7 +74,7 @@
       <select id="game-type-select" class="full-select" onchange="onGameTypeChange()"></select>
     </section>
 
-    <section class="card">
+    <section class="card" data-setup-section>
       <div class="section-heading">
         <h2>Game Settings</h2>
         <p class="section-subtitle">Global values apply unless a player override is entered.</p>
@@ -118,7 +124,7 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" data-setup-section>
       <div class="section-header">
         <div>
           <h2>Players</h2>
@@ -179,6 +185,49 @@
           <span>Ready</span>
         </div>
       </div>
+    </section>
+
+    <section class="card readiness-card" id="readiness-card" aria-labelledby="readiness-title">
+      <div class="section-heading readiness-heading">
+        <h2 id="readiness-title">Countdown Readiness</h2>
+        <p id="readiness-summary" class="section-subtitle" aria-live="polite">Checking the arena…</p>
+      </div>
+      <ul class="readiness-list" aria-label="Countdown readiness checks">
+        <li id="readiness-relay" class="readiness-item is-waiting">
+          <span class="readiness-icon" aria-hidden="true">…</span>
+          <span><strong>Relay connected</strong><small>Checking relay status.</small></span>
+        </li>
+        <li id="readiness-phase" class="readiness-item is-waiting">
+          <span class="readiness-icon" aria-hidden="true">…</span>
+          <span><strong>Hosting lobby</strong><small>Start hosting to open the lobby.</small></span>
+        </li>
+        <li id="readiness-roster" class="readiness-item is-waiting">
+          <span class="readiness-icon" aria-hidden="true">…</span>
+          <span><strong>Exact roster</strong><small>Waiting for the lobby.</small></span>
+        </li>
+        <li id="readiness-confirmed" class="readiness-item is-waiting">
+          <span class="readiness-icon" aria-hidden="true">…</span>
+          <span><strong>Taggers confirmed</strong><small>Waiting for joined taggers.</small></span>
+        </li>
+        <li id="readiness-teams" class="readiness-item is-waiting">
+          <span class="readiness-icon" aria-hidden="true">…</span>
+          <span><strong>Team coverage</strong><small>Checked after hosting begins.</small></span>
+        </li>
+      </ul>
+    </section>
+
+    <section class="card history-card" id="history-card" aria-labelledby="history-title">
+      <div class="section-header">
+        <div>
+          <h2 id="history-title">Recent Results</h2>
+          <p id="history-summary" class="section-subtitle">Unlock operator controls to view saved games.</p>
+        </div>
+        <button type="button" id="history-refresh" class="pill-btn" onclick="loadHistory()">Refresh</button>
+      </div>
+      <div id="history-list" class="history-list">
+        <div class="history-empty">No saved results loaded.</div>
+      </div>
+      <div id="history-detail" class="history-detail" hidden></div>
     </section>
 
     <section class="card" id="live-card">

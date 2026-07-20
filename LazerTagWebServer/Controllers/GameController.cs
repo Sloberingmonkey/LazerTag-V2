@@ -217,6 +217,56 @@ public sealed class GameController : ControllerBase
                 return Fail($"Player {player.Slot}'s sleep timeout must be blank or 0-99 minutes.", out error);
         }
 
+        if (gameType.TeamCount > 1)
+        {
+            if (req.Players.Count < gameType.TeamCount)
+                return Fail($"{gameType.Label} needs at least one player on each of its {gameType.TeamCount} teams.", out error);
+
+            // Resolve Auto rows now, in stable roster order. HostGun treats a planned team as
+            // authoritative, so this guarantees every declared team is represented and prevents
+            // an otherwise valid lobby from becoming impossible to start after all taggers join.
+            var teamCounts = new int[gameType.TeamCount + 1];
+            var autoPlayers = req.Players
+                .Where(player => !player.TeamPreference.HasValue)
+                .OrderBy(player => player.Slot)
+                .ToList();
+
+            foreach (var player in req.Players.Where(player => player.TeamPreference.HasValue))
+                teamCounts[player.TeamPreference!.Value]++;
+
+            int overCapacityTeam = Enumerable.Range(1, gameType.TeamCount)
+                .FirstOrDefault(team => teamCounts[team] > 8);
+            if (overCapacityTeam != 0)
+                return Fail($"Team {overCapacityTeam} has more than the protocol limit of 8 planned players.", out error);
+
+            var missingTeams = Enumerable.Range(1, gameType.TeamCount)
+                .Where(team => teamCounts[team] == 0)
+                .ToList();
+            if (autoPlayers.Count < missingTeams.Count)
+            {
+                return Fail(
+                    $"Every team needs a planned player. Add Auto players or assign Team {string.Join(" or Team ", missingTeams)}.",
+                    out error);
+            }
+
+            int autoIndex = 0;
+            foreach (int team in missingTeams)
+            {
+                autoPlayers[autoIndex++].TeamPreference = team;
+                teamCounts[team]++;
+            }
+
+            while (autoIndex < autoPlayers.Count)
+            {
+                int team = Enumerable.Range(1, gameType.TeamCount)
+                    .OrderBy(candidate => teamCounts[candidate])
+                    .ThenBy(candidate => candidate)
+                    .First();
+                autoPlayers[autoIndex++].TeamPreference = team;
+                teamCounts[team]++;
+            }
+        }
+
         return true;
     }
 

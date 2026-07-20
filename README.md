@@ -9,6 +9,12 @@ read-only 1280x720 TV scoreboard.
 
 ## Current status
 
+The hardware-verified Version 1 source is preserved separately from the
+operations-focused `2.0.0-rc.1` candidate. See
+[`V2_RELEASE_CANDIDATE.md`](V2_RELEASE_CANDIDATE.md) for the exact scope,
+acceptance checklist, and rollback path before installing the candidate in a
+public arena.
+
 The following paths have been exercised with real arena hardware:
 
 - tagger joining and guided player assignment;
@@ -68,9 +74,15 @@ Do not expose ports `5000` or `8266` to the public internet.
 - Solo, two-team, and three-team hosted-game support.
 - Guided tagger joining and confirmed player assignment.
 - Live countdown, game-state, roster, score, and debrief updates.
+- Operator readiness checks that block countdown until the relay, roster,
+  assignments, and team coverage are ready.
+- Persistent completed-game history with operator-only detail, JSON, and CSV
+  access under the arena data directory.
 - Player settings with validated, atomic persistence.
 - Automatic relay reconnect and stale-game event protection.
 - Responsive desktop, phone, and 1280x720 television interfaces.
+- Mode-correct player and team ranking on the TV, with distinct relay-offline
+  and scoreboard-offline warnings that automatically clear after recovery.
 - Hardened Raspberry Pi deployment with health checks and automatic rollback.
 - WPA2 arena hotspot, DHCP exclusions, client isolation, and nftables rules.
 - Versioned read-only releases and persistent state outside the application tree.
@@ -287,7 +299,7 @@ arena firmware.
 
 ### A player remains in Summary and is repeatedly requested
 
-Check the operator log. Current `main` includes compatibility handling for the
+Check the operator log. The current server source includes compatibility handling for the
 observed non-canonical detailed count `0x8A`. Update and redeploy the server
 before changing ESP32 firmware. Confirm the log progresses to:
 

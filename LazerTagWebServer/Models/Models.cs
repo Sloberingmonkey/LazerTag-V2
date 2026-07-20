@@ -70,7 +70,15 @@ public class GameStateSnapshot
 {
     public string State          { get; set; } = "Idle";
     public string HostingState   { get; set; } = "Idle";
+    public int    GameTypeId     { get; set; }
+    public string GameTypeLabel  { get; set; } = "";
     public bool   IsTeamGame     { get; set; }
+    public int    TeamCount      { get; set; }
+    public int    PlannedPlayerCount { get; set; }
+
+    /// <summary>True only after a complete, non-forced debrief finalized library scores.</summary>
+    public bool   ResultsFinalized { get; set; }
+    public GameHistorySettings? Settings { get; set; }
     public string GuidedJoinHint { get; set; } = "";
 
     // Timer data - TV uses these to sync its countdown/game clock after late connect
@@ -81,6 +89,7 @@ public class GameStateSnapshot
     public long GameStartedAtMs      { get; set; }
 
     public List<PlayerSnapshot> Players { get; set; } = [];
+    public List<TeamSnapshot> Teams { get; set; } = [];
 }
 
 /// <summary>Per-player data included in GameStateSnapshot.</summary>
@@ -100,9 +109,18 @@ public class PlayerSnapshot
 
     /// <summary>Calculated score from the library (accounts for game type scoring rules).</summary>
     public int Score        { get; set; }
+    public int Rank         { get; set; }
 
     public int  TaggerId     { get; set; }
     public bool AllDebriefed { get; set; }
+}
+
+/// <summary>Authoritative team result calculated by the game engine.</summary>
+public class TeamSnapshot
+{
+    public int Number { get; set; }
+    public int Score  { get; set; }
+    public int Rank   { get; set; }
 }
 
 // ── Responses ─────────────────────────────────────────────────────────────────

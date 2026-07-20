@@ -102,6 +102,34 @@ public sealed class ArenaApiTests : IClassFixture<ArenaWebApplicationFactory>
         Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/game/next", null)).StatusCode);
     }
 
+    [Fact]
+    public async Task Team_rosters_require_coverage_but_allow_auto_rows_to_fill_missing_teams()
+    {
+        using var client = _factory.CreateClient();
+        string token = await LoginAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var tooFewForThreeTeams = StartRequest(4, [1, 2]);
+        var noWayToCoverThreeTeams = StartRequest(4, [1, 1, 1]);
+        var oneTeamOverCapacity = StartRequest(3, [1, 1, 1, 1, 1, 1, 1, 1, 1, 2]);
+        var autoCanCoverMissingTeams = StartRequest(4, [1, null, null]);
+
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync("/api/game/start", tooFewForThreeTeams)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync("/api/game/start", noWayToCoverThreeTeams)).StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest,
+            (await client.PostAsJsonAsync("/api/game/start", oneTeamOverCapacity)).StatusCode);
+
+        // Validation succeeds and reaches the deliberately unreachable test relay. StartServer
+        // opens the lobby before its first asynchronous reconnect attempt, so clean it up before
+        // asserting the validation result to keep the shared test fixture idle.
+        var accepted = await client.PostAsJsonAsync("/api/game/start", autoCanCoverMissingTeams);
+        if (accepted.IsSuccessStatusCode)
+            Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/game/endgame", null)).StatusCode);
+        Assert.NotEqual(HttpStatusCode.BadRequest, accepted.StatusCode);
+    }
+
     private static object StartRequest(int gameType, int playerCount) => new
     {
         gameType,
@@ -119,6 +147,26 @@ public sealed class ArenaApiTests : IClassFixture<ArenaWebApplicationFactory>
             slot,
             name = $"Player {slot}",
             teamPreference = (int?)null,
+        }),
+    };
+
+    private static object StartRequest(int gameType, int?[] teamPreferences) => new
+    {
+        gameType,
+        gameTypeLabel = "ignored client label",
+        minutes = 10,
+        countdownSeconds = 30,
+        globalHp = 10,
+        globalShields = 0,
+        globalReloads = 0,
+        globalMega = 0,
+        globalStartingAmmo = 10,
+        globalSleepTimeout = 0,
+        players = teamPreferences.Select((team, index) => new
+        {
+            slot = index + 1,
+            name = $"Player {index + 1}",
+            teamPreference = team,
         }),
     };
 

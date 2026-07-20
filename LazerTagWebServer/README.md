@@ -30,6 +30,26 @@ Production requires `Arena__OperatorPin`, uses `Arena__RelayAddress` for the
 ESP32 endpoint, and stores state under `Arena__DataDirectory`. The hardened Pi
 installer creates and protects those settings automatically.
 
+## Completed-game history
+
+The first transition to Game Over freezes an immutable result and queues an
+atomic JSON write under `Arena__DataDirectory/game-history`.
+`Arena__HistoryRetention` controls the number of results retained (default
+1000, maximum 10000). Slow or failed storage never holds the game lifecycle
+lock or blocks the next game. Forced/incomplete debriefs are retained for
+diagnostics with `resultsFinalized=false`; their score and rank fields must not
+be treated as authoritative.
+
+Authorized operators can review the eight most recent results directly in the
+control page, inspect player rankings, and download either CSV or JSON.
+
+After unlocking the operator console, its bearer token authorizes these routes:
+
+- `GET /api/history?limit=50` - recent result summaries
+- `GET /api/history/{gameId}` - one saved result, including finalization status
+- `GET /api/history/{gameId}/download.json` - original JSON record
+- `GET /api/history/{gameId}/download.csv` - spreadsheet-friendly player results
+
 ## Deploy from Visual Studio Code
 
 After completing the one-time Pi installation in
