@@ -22,6 +22,8 @@
 
 		public RandomId GameId { get; set; }
 		public int GameTimeMinutes { get; set; }
+		// A host without a planned roster admits players up to the protocol capacity.
+		public int? PlannedPlayerCount { get; set; }
 		public int Tags { get; set; }
 
 		private int _reloads;

@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          dotnet-version: 10.0.x
 
       - name: Restore
         run: dotnet restore LazerTagWebServer.Tests/LazerTagWebServer.Tests.csproj
@@ -26,10 +26,19 @@ jobs:
         run: dotnet test LazerTagWebServer.Tests/LazerTagWebServer.Tests.csproj --configuration Release --no-restore
 
       - name: Check browser JavaScript
-        run: node --check LazerTagWebServer/wwwroot/js/app.js
+        run: |
+          node --check LazerTagWebServer/wwwroot/js/app.js
+          node --check LazerTagWebServer/wwwroot/js/snapshots.js
+          node --test LazerTagWebServer.Tests/operator-console.test.cjs
+
+      - name: Test published readiness and deployment rollback
+        run: python3 deployment-tests/release-readiness-test.py
 
       - name: Validate deployment shell scripts
-        run: bash -n deployment/*.sh
+        run: bash deployment-tests/check-shell-syntax.sh
+
+      - name: Test release archive staging and shell checks
+        run: python3 deployment-tests/deployment-tools-test.py
 
       - name: Test hotspot readiness check
         run: bash deployment-tests/hotspot-check-test.sh
@@ -71,6 +80,25 @@ jobs:
             artifacts/lazertag-linux-arm64.tar.gz
             artifacts/lazertag-deployment.tar.gz
             artifacts/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+  updater:
+    name: Windows LAN updater
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Test updater and SSH upload
+        run: dotnet test LazerTagUpdater.Tests/LazerTagUpdater.Tests.csproj -c Release
+      - name: Publish standalone updater
+        run: dotnet publish LazerTagUpdater/LazerTagUpdater.csproj -c Release -r win-x64 -o artifacts/updater
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazertag-windows-updater
+          path: artifacts/updater/LazerTagUpdater.exe
           if-no-files-found: error
           retention-days: 30
 

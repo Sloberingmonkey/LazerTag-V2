@@ -2,7 +2,7 @@
 
 This runbook builds a reproducible, appliance-style LTAR server on a Raspberry
 Pi 3B/3B+. It targets **Raspberry Pi OS Lite 64-bit (Trixie / Debian 13)** and a
-self-contained .NET 8 `linux-arm64` release.
+self-contained .NET 10 `linux-arm64` release.
 
 The production layout is intentionally split:
 
@@ -27,7 +27,7 @@ The web server runs as the non-login `lazertag` system user. It never runs as
 - Secured, dedicated arena Wi-Fi; the installer uses standalone hostapd on the
   built-in radio, while a dedicated external AP remains preferable at scale
 - Optional HDMI display for the read-only TV kiosk
-- A workstation with the .NET 8 SDK, OpenSSH client, and `tar`
+- A workstation with the .NET 10 SDK, OpenSSH client, and `tar`
 
 Use Raspberry Pi Imager to install **Raspberry Pi OS Lite (64-bit), Trixie**.
 In Imager customization, set a unique administrator username (not `pi`), install
@@ -216,6 +216,9 @@ arena clients to reach the wired Pi and ESP32.
 
 ## 6. Configure and verify the ESP32
 
+The Pi web server requires a TCP relay address such as `192.168.4.100:8266`.
+To read boot and connection diagnostics, open the ESP32 USB serial monitor at 115200 baud.
+
 Program the ESP32 with:
 
 ```text
@@ -315,15 +318,57 @@ restart/close shared control browsers at the end of the day.
 
 ## 9. Updates and automatic rollback
 
-Build and copy a new archive as in section 3. Never update during a live game.
-On the Pi:
+### Update from a Windows PC
+
+For the first upgrade from rc.2 or earlier, finish the game and debrief, check that Recent Results has finished saving, and close the arena to new games. On the Pi run `sudo systemctl stop lazertag.service`, then install the update. If installation is cancelled before activation, run `sudo systemctl start lazertag.service` to reopen the current release. Once rc.3 is active, the Pi coordinates LAN updates and new games automatically.
+
+The **LazerTag Pi Updater** works on Windows x64 with an already-installed
+appliance. Connect the PC to the same management network as the Pi's Ethernet
+interface. The arena hotspot blocks SSH by design.
+
+1. Open **LazerTagUpdater.exe**. Use the standalone app from the Windows CI
+   artifact or the local build described in the project README.
+2. Use `lazertag-pi.local` or the Pi's management IP, enter the SSH username,
+   and enter the Pi account password. For key login, select **Use an SSH
+   private key** and choose the private key file. Encrypted keys prompt for a
+   passphrase. With key login, enter the account password if sudo requires one.
+3. Choose **lazertag-linux-arm64.tar.gz** from section 3 or from the extracted
+   server CI artifact. Placing the archive alongside the updater selects it
+   automatically. If the release comes with `lazertag-deploy-update.sh`, keep
+   it beside the archive. The updater checks it against its bundled script,
+   uploads it, and refreshes the Pi's release checker before activation.
+4. Between games, click **Install update**. On the first connection compare
+   the displayed SHA-256 fingerprint with the corresponding public host key
+   on the Pi. For example, run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+   for the Ed25519 key. Approve the matching fingerprint.
+5. Wait for **Update installed**. The Pi verifies the upload's SHA-256 and
+   runs the installed deployer. The app checks the game state again after the
+   upload and stops if a game is active. The deployer backs up the arena and
+   checks readiness after restarting.
+
+The updater keeps approved host fingerprints in
+`%LOCALAPPDATA%\LazerTagUpdater\hosts`. After reimaging a Pi, verify its new
+fingerprint from the Pi console before removing the old entry named in the
+app's message. A personal Windows kit can include a machine-protected
+`pi-login.dpapi` beside the executable. Leave the password field empty to use
+that login for its saved Pi address and username, or type a password to override it.
+If the LAN drops after installation starts, the Pi continues the deployment.
+Reconnect and use the update-specific journal command shown by the app to
+check its outcome before retrying.
+
+### Update from the Pi console
+
+Build and copy a new archive as in section 3. Between games, run:
 
 ```bash
 sudo lazertag-deploy /tmp/lazertag-linux-arm64.tar.gz
 ```
 
-`lazertag-deploy` verifies archive paths, required files, ARM64 ELF architecture,
-and the archive checksum. It creates a pre-update backup, atomically switches the
+`lazertag-deploy` takes a private copy, checks every archive member, and unpacks
+ordinary files using an unprivileged account. It verifies the required files and
+ARM64 apphost. The LAN updater supplies the expected SHA-256 digest. For a direct
+install you can pass `--sha256 DIGEST` to check a known release digest. The
+deployer creates a pre-update backup, atomically switches the
 release symlink, restarts the service, and waits for `/healthz`. A failed update
 automatically switches back to the previously active release. The last five
 releases are retained.

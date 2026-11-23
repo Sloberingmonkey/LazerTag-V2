@@ -32,6 +32,7 @@ const OPERATOR_TOKEN_KEY = 'lazertag_operator_token';
 const ACTIVE_SETUP_KEY = 'lazertag_active_setup';
 const SNAPSHOT_STALE_AFTER_MS = 12000;
 
+const snapshotOrder = new ArenaSnapshotOrder();
 const connection = new signalR.HubConnectionBuilder()
     .withUrl('/gamehub', { accessTokenFactory: () => operatorToken || '' })
     .withAutomaticReconnect([0, 2000, 5000, 10000])
@@ -72,7 +73,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     await refreshSnapshots();
     await startSignalR();
 
-    refreshTimer = window.setInterval(refreshSnapshots, 5000);
+    refreshTimer = window.setInterval(() => { if (snapshotOrder.needsRefresh()) void refreshSnapshots(); }, 5000);
     freshnessTimer = window.setInterval(refreshFreshnessUi, 1000);
     document.getElementById('player-count').addEventListener('change', () => buildPlayerSlots());
 
@@ -194,6 +195,7 @@ function setOperatorAuthenticated(authenticated, showDialog) {
     if (dialog) dialog.hidden = operatorAuthenticated || !showDialog;
     const historyRefresh = document.getElementById('history-refresh');
     if (historyRefresh) historyRefresh.disabled = !operatorAuthenticated;
+    renderHistoryWriteStatus(currentTelemetry);
     if (!operatorAuthenticated) renderHistoryLocked();
     updateActionBar(currentSnapshot?.hostingState || 'idle');
 
@@ -280,23 +282,25 @@ function forgetActiveSetup() {
     removeSessionValue(ACTIVE_SETUP_KEY);
 }
 
-async function refreshSnapshots() {
+function refreshSnapshots() { return snapshotOrder.refresh(loadSnapshots); }
+
+async function loadSnapshots(generation, signal) {
     const [stateResult, telemetryResult] = await Promise.allSettled([
-        fetchJson('/api/game/state'),
-        fetchJson('/api/game/telemetry'),
+        fetchJson('/api/game/state', { signal }),
+        fetchJson('/api/game/telemetry', { signal }),
     ]);
 
-    if (stateResult.status === 'fulfilled') applyState(stateResult.value);
+    if (stateResult.status === 'fulfilled') applyState(stateResult.value, generation);
     else console.debug('State snapshot refresh failed:', stateResult.reason);
 
-    if (telemetryResult.status === 'fulfilled') applyTelemetry(telemetryResult.value);
+    if (telemetryResult.status === 'fulfilled') applyTelemetry(telemetryResult.value, generation);
     else console.debug('Telemetry snapshot refresh failed:', telemetryResult.reason);
 
     refreshFreshnessUi();
 }
 
 function isSnapshotFresh(updatedAtMs) {
-    return updatedAtMs > 0 && Date.now() - updatedAtMs <= SNAPSHOT_STALE_AFTER_MS;
+    return updatedAtMs > 0 && performance.now() - updatedAtMs <= SNAPSHOT_STALE_AFTER_MS;
 }
 
 function isStateSnapshotFresh() {
@@ -308,6 +312,7 @@ function isTelemetrySnapshotFresh() {
 }
 
 function markControlConnectionInterrupted() {
+    snapshotOrder.reconnect();
     lastStateUpdateMs = 0;
     lastTelemetryUpdateMs = 0;
     currentTelemetry = null;
@@ -367,9 +372,20 @@ async function loadGameTypes() {
 
     try {
         gameTypes = await fetchJson('/api/game/gametypes');
-        select.innerHTML = gameTypes
-            .map(type => `<option value="${type.id}">${esc(type.label)}</option>`)
-            .join('');
+        const groups = [];
+        gameTypes.forEach(type => {
+            const category = type.category || 'Games';
+            let group = groups.find(item => item.category === category);
+            if (!group) {
+                group = { category, types: [] };
+                groups.push(group);
+            }
+            group.types.push(type);
+        });
+        select.innerHTML = groups.map(group =>
+            `<optgroup label="${esc(group.category)}">${group.types
+                .map(type => `<option value="${type.id}">${esc(type.label)}</option>`)
+                .join('')}</optgroup>`).join('');
 
         const preferred = gameTypes.find(type => type.isDefault) || gameTypes[0];
         if (preferred) select.value = String(preferred.id);
@@ -383,10 +399,25 @@ async function loadGameTypes() {
 async function loadSavedPlayers() {
     if (!operatorAuthenticated) return;
     try {
-        savedPlayers = await fetchJson('/api/game/savedplayers');
+        const saved = await fetchJson('/api/game/savedplayers');
+        // Saved roster files and the existing API use PascalCase row fields.
+        savedPlayers = {
+            playerCount: saved.playerCount,
+            rows: saved.rows.map(row => ({
+                name: row.Name,
+                teamPreference: row.TeamPreference,
+                hp: row.Hp,
+                shields: row.Shields,
+                reloads: row.Reloads,
+                autoReload: row.AutoReload,
+                fullAuto: row.FullAuto,
+                ammo: row.Ammo,
+                sleepTimeout: row.SleepTimeout,
+            })),
+        };
         savedPlannedCount = clamp(parseInt(savedPlayers.playerCount, 10) || 3, 2, 24);
         if (!isSetupLocked()) {
-            const count = clamp(savedPlannedCount, 2, getMaxPlayers());
+            const count = clamp(savedPlannedCount, getMinPlayers(), getMaxPlayers());
             savedPlayers.playerCount = count;
             document.getElementById('player-count').value = count;
         }
@@ -394,6 +425,18 @@ async function loadSavedPlayers() {
     } catch (error) {
         console.debug('Saved player settings unavailable:', error);
     }
+}
+
+function renderHistoryWriteStatus(telemetry) {
+    const status = document.getElementById('history-write-status');
+    if (!status) return;
+    const pending = telemetry?.pendingHistoryWrites || 0;
+    status.hidden = !operatorAuthenticated || pending === 0;
+    if (status.hidden) return;
+    const games = pending === 1 ? '1 completed game' : `${pending} completed games`;
+    status.textContent = telemetry.retryingHistoryWrites > 0
+        ? `Waiting to save ${games}. Check the Pi’s storage and keep the server running. Saving will retry automatically.`
+        : `Saving ${games}…`;
 }
 
 async function loadHistory({ preserveDetail = false } = {}) {
@@ -626,24 +669,81 @@ async function applyGameTypeMetadata(applyDefaults) {
 
     currentTeamCount = Math.max(1, Number(metadata?.teamCount) || 1);
     isTeamGame = currentTeamCount > 1;
-    syncPlayerCountLimit(metadata?.maxPlayers);
+    syncPlayerCountLimit(metadata?.maxPlayers, metadata?.minPlayers);
+    applyMinuteLimits(metadata);
     updateTeamSelectors();
+    renderGameModeInfo(metadata);
+    applyModeCapabilities(metadata);
 
     if (applyDefaults && Number.isFinite(selectedId)) {
         try {
             const defaults = await fetchJson(`/api/game/gametypedefaults/${selectedId}`);
+            if (Number(document.getElementById('game-type-select').value) !== selectedId) return;
             setVal('minutes', defaults.defaultMinutes);
             setVal('global-hp', defaults.defaultHp);
             setVal('global-shields', defaults.defaultShields);
             setVal('global-reloads', defaults.defaultReloads);
             setVal('global-mega', defaults.defaultMega);
             setChk('opt-slow-tags', defaults.defaultSlowTags);
+            setChk('opt-team-tags', defaults.defaultTeamTags);
         } catch (error) {
             showToast(error.message, 'error');
         }
     }
 
     updateOverview();
+}
+
+function applyMinuteLimits(metadata) {
+    const input = document.getElementById('minutes');
+    if (!input) return;
+    input.min = String(Math.max(1, Number(metadata?.minMinutes) || 1));
+    input.max = String(Math.max(Number(input.min), Number(metadata?.maxMinutes) || 99));
+    input.step = String(Math.max(1, Number(metadata?.minuteStep) || 1));
+}
+
+function renderGameModeInfo(metadata) {
+    setText('game-mode-code', metadata?.code || 'MODE');
+    setText('game-mode-objective', metadata?.objective || 'Choose a game mode.');
+    const note = document.getElementById('game-mode-note');
+    if (!note) return;
+    note.textContent = metadata?.operatorNote || '';
+    note.classList.toggle('mode-standard-note', Boolean(metadata?.requiresStandardHosting));
+}
+
+function setModeDisabled(control, disabled) {
+    if (!control) return;
+    if (control.dataset.setupBaseDisabled === undefined)
+        control.dataset.setupBaseDisabled = control.disabled ? 'true' : 'false';
+    control.dataset.modeDisabled = disabled ? 'true' : 'false';
+    const setupLocked = isSetupLocked();
+    const baseDisabled = control.dataset.setupBaseDisabled === 'true';
+    control.disabled = setupLocked || baseDisabled || disabled;
+    control.closest('label, .setting-item')?.classList.toggle('mode-disabled-control', disabled);
+}
+
+function applyModeCapabilities(metadata) {
+    const standardOnly = Boolean(metadata?.requiresStandardHosting);
+    document.getElementById('countdown').max = String(metadata?.maxCountdownSeconds ?? 255);
+    const maxHpAndShields = String(metadata?.maxHpAndShields ?? 254);
+    document.querySelectorAll('#global-hp,#global-shields,.p-hp,.p-shields')
+        .forEach(input => { input.max = maxHpAndShields; });
+    const globalEnhancedIds = ['opt-auto-reload', 'opt-full-auto', 'opt-disable-iff', 'opt-disable-hitreg', 'global-ammo', 'global-sleep'];
+
+    if (standardOnly) {
+        setChk('opt-auto-reload', false);
+        setChk('opt-full-auto', false);
+        setChk('opt-disable-iff', false);
+        setChk('opt-disable-hitreg', false);
+        setVal('global-ammo', 0);
+        setVal('global-sleep', 0);
+        document.querySelectorAll('.p-ar,.p-fa').forEach(input => { input.checked = false; });
+        document.querySelectorAll('.p-ammo,.p-sleep').forEach(input => { input.value = ''; });
+    }
+
+    globalEnhancedIds.forEach(id => setModeDisabled(document.getElementById(id), standardOnly));
+    document.querySelectorAll('.p-ar,.p-fa,.p-ammo,.p-sleep')
+        .forEach(input => setModeDisabled(input, standardOnly));
 }
 
 function updateTeamSelectors() {
@@ -660,22 +760,28 @@ function updateTeamSelectors() {
 }
 
 // ── Phase-aware controls ──────────────────────────────────────────────────────
+function canEndGame(state) {
+    return isLobbyState(state) || ['countdown', 'resendcountdown', 'playing'].includes(state);
+}
+
+function missingReportCount(snapshot) {
+    return snapshot?.players?.filter(player => !player.allDebriefed).length || 0;
+}
+
 function updateActionBar(state) {
     const normalized = (state || '').toLowerCase();
     const stateFresh = isStateSnapshotFresh();
     const isIdle = normalized === 'idle' || normalized === '';
-    const isLobby = normalized === 'adding' || normalized === 'acknowledgeplayerassignment';
-    const isActive = normalized === 'countdown' || normalized === 'resendcountdown' || normalized === 'playing';
-    const isSummary = ['summary', 'debriefing', 'waitingfordebriefing'].includes(normalized);
     const isOver = normalized === 'gameover';
-
-    const endLabel = document.getElementById('end-action-label');
-    if (endLabel) endLabel.textContent = isSummary ? 'Force Finish' : 'End Game';
+    const canFinish = normalized === 'summary' && !!currentSnapshot?.gameId && missingReportCount(currentSnapshot) > 0;
+    const finishButton = document.getElementById('btn-finish-debrief');
+    if (finishButton) finishButton.hidden = !canFinish;
 
     const readiness = getCountdownReadiness(normalized);
     setBtn('btn-start', stateFresh && isIdle);
-    setBtn('btn-countdown', isLobby && readiness.ready);
-    setBtn('btn-end', stateFresh && (isLobby || isActive || isSummary));
+    setBtn('btn-countdown', isLobbyState(normalized) && readiness.ready);
+    setBtn('btn-end', stateFresh && !!currentSnapshot?.gameId && canEndGame(normalized));
+    setBtn('btn-finish-debrief', stateFresh && canFinish);
     setBtn('btn-next', stateFresh && isOver);
     setSetupLocked(!isIdle, normalized);
     renderCountdownReadiness(readiness);
@@ -720,7 +826,9 @@ function setSetupLocked(locked, state) {
             if (control.dataset.setupBaseDisabled === undefined) {
                 control.dataset.setupBaseDisabled = control.disabled ? 'true' : 'false';
             }
-            control.disabled = locked || control.dataset.setupBaseDisabled === 'true';
+            control.disabled = locked
+                || control.dataset.setupBaseDisabled === 'true'
+                || control.dataset.modeDisabled === 'true';
         });
     });
 
@@ -930,7 +1038,7 @@ function renderCountdownReadiness(readiness) {
 // ── Player setup ──────────────────────────────────────────────────────────────
 function buildPlayerSlots(rows) {
     const countInput = document.getElementById('player-count');
-    const count = clamp(parseInt(countInput.value, 10) || 3, 2, getMaxPlayers());
+    const count = clamp(parseInt(countInput.value, 10) || 3, getMinPlayers(), getMaxPlayers());
     countInput.value = count;
 
     let sourceRows = rows;
@@ -984,6 +1092,8 @@ function buildPlayerSlots(rows) {
     }
 
     document.getElementById('guided-join-hint').textContent = '';
+    const metadata = gameTypes.find(type => Number(type.id) === Number(document.getElementById('game-type-select')?.value));
+    applyModeCapabilities(metadata);
     updateOverview();
 }
 
@@ -1066,7 +1176,7 @@ function captureConfig() {
         fullAuto: isChecked('opt-full-auto'),
         disableIff: isChecked('opt-disable-iff'),
         disableHitRegister: isChecked('opt-disable-hitreg'),
-        playerCount: clamp(intVal('player-count'), 1, 24),
+        playerCount: clamp(intVal('player-count'), getMinPlayers(), getMaxPlayers()),
         players: readGrid(),
     };
 }
@@ -1090,8 +1200,10 @@ async function applyConfig(config) {
     setChk('opt-full-auto', config.fullAuto);
     setChk('opt-disable-iff', config.disableIff ?? true);
     setChk('opt-disable-hitreg', config.disableHitRegister ?? true);
-    setVal('player-count', clamp(Number(config.playerCount) || 3, 1, 24));
+    setVal('player-count', clamp(Number(config.playerCount) || 3, getMinPlayers(), getMaxPlayers()));
     buildPlayerSlots(config.players || []);
+    const metadata = gameTypes.find(type => Number(type.id) === Number(document.getElementById('game-type-select')?.value));
+    applyModeCapabilities(metadata);
     updateOverview();
 }
 
@@ -1221,6 +1333,7 @@ async function startHosting() {
         successMessage: 'Hosting started. Turn on the taggers in player order.',
     });
     if (started) {
+        savedPlayers = { playerCount: plannedPlayers.length, rows: plannedPlayers };
         savedPlannedCount = pendingSetup.plannedCount;
         rememberActiveSetup(pendingSetup);
         updateActionBar(currentSnapshot?.hostingState || 'idle');
@@ -1241,13 +1354,23 @@ async function startCountdown() {
 }
 
 async function endGame() {
-    const isSummary = (currentSnapshot?.hostingState || '').toLowerCase() === 'summary';
-    const message = isSummary
-        ? 'Force debriefing to finish? Taggers that have not reported will be dropped and their scores may be incomplete.'
-        : 'End the current game now?';
-    if (!window.confirm(message)) return;
-    await runAction('btn-end', '/api/game/endgame', {
-        successMessage: isSummary ? 'Debriefing forced to Game Over.' : 'Game ended.',
+    const snapshot = currentSnapshot;
+    if (!snapshot?.gameId || !isStateSnapshotFresh() || !canEndGame(snapshot.hostingState.toLowerCase())) return;
+    if (!window.confirm('End the current game now?')) return;
+    await runAction('btn-end', `/api/game/${encodeURIComponent(snapshot.gameId)}/endgame`, {
+        successMessage: 'Game ended.',
+    });
+}
+
+async function finishDebrief() {
+    const snapshot = currentSnapshot;
+    if (!snapshot?.gameId || !isStateSnapshotFresh() || snapshot.hostingState.toLowerCase() !== 'summary') return;
+    const missing = missingReportCount(snapshot);
+    if (!missing) return;
+    const who = missing === 1 ? '1 tagger still owes reports.' : `${missing} taggers still owe reports.`;
+    if (!window.confirm(`${who} Finish now and save incomplete results?`)) return;
+    await runAction('btn-finish-debrief', `/api/game/${encodeURIComponent(snapshot.gameId)}/finish-debrief`, {
+        successMessage: 'Debriefing finished.',
     });
 }
 
@@ -1362,6 +1485,9 @@ function hydrateActiveSessionFields(snapshot) {
         ? serverTeamCount
         : Math.max(1, Number(selectedType?.teamCount) || 1);
     isTeamGame = Boolean(snapshot?.isTeamGame);
+    applyMinuteLimits(selectedType);
+    renderGameModeInfo(selectedType);
+    applyModeCapabilities(selectedType);
 
     const minutes = Number(snapshot?.gameMinutes);
     if (Number.isInteger(minutes) && minutes >= 1 && minutes <= 255) setVal('minutes', minutes);
@@ -1398,9 +1524,10 @@ function hydrateActiveSessionFields(snapshot) {
     }
 }
 
-function applyState(snapshot) {
+function applyState(snapshot, generation) {
+    if (!snapshotOrder.accept('state', snapshot, generation)) return;
     if (!snapshot) return;
-    lastStateUpdateMs = Date.now();
+    lastStateUpdateMs = performance.now();
     const previousState = (currentSnapshot?.hostingState || '').toLowerCase();
     currentSnapshot = snapshot;
 
@@ -1442,6 +1569,7 @@ function applyState(snapshot) {
     }
     const stateKey = [
         state,
+        snapshot.gameId || '',
         snapshot.state || '',
         snapshot.guidedJoinHint || '',
         snapshot.gameTypeId || 0,
@@ -1453,7 +1581,7 @@ function applyState(snapshot) {
         snapshot.isTeamGame ? 1 : 0,
         ...players.map(player => [
             player.id, player.name, player.team || 0, player.confirmed ? 1 : 0,
-            player.hitsScored || 0, player.hitsTaken || 0,
+            player.hitsScored || 0, player.hitsTaken || 0, player.allDebriefed ? 1 : 0,
         ].join(':')),
     ].join('|');
 
@@ -1474,9 +1602,13 @@ function applyState(snapshot) {
     const plannedCount = configuredPlannedCount();
     updateOverview();
     document.getElementById('overview-message').textContent = overviewMessage(state, players.length, plannedCount);
-    document.getElementById('live-summary').textContent = players.length
+    const liveSummary = document.getElementById('live-summary');
+    liveSummary.textContent = players.length
         ? `${players.length} connected · ${readyCount} ready`
         : 'No taggers connected.';
+    if (state === 'summary') {
+        liveSummary.textContent = `${players.length - missingReportCount(snapshot)} of ${players.length} taggers have sent all reports.`;
+    }
 
     const liveList = document.getElementById('live-player-list');
     if (!players.length) {
@@ -1496,21 +1628,30 @@ function applyState(snapshot) {
             ? `${scored} scored · ${taken} taken`
             : snapshot.isTeamGame ? `Team ${player.team}` : `Player ${player.slot}`;
 
+        const status = state === 'summary'
+            ? (player.allDebriefed ? '✓ Reported' : 'Awaiting report')
+            : (player.confirmed ? '✓ Ready' : 'Joining…');
         return `<article class="live-player${player.confirmed ? ' is-confirmed' : ''}">
           <span class="live-player-id">${esc(identifier)}</span>
           <span class="live-player-name">
             <strong>${esc(player.name || identifier)}</strong>
             <span>${esc(details)}</span>
           </span>
-          <span class="live-player-status">${player.confirmed ? '✓ Ready' : 'Joining…'}</span>
+          <span class="live-player-status">${status}</span>
         </article>`;
     }).join('');
 }
 
-function applyTelemetry(telemetry) {
+function applyTelemetry(telemetry, generation) {
+    if (!snapshotOrder.accept('telemetry', telemetry, generation)) return;
     if (!telemetry) return;
-    lastTelemetryUpdateMs = Date.now();
+    lastTelemetryUpdateMs = performance.now();
+    const previousSaved = currentTelemetry?.historyWritesCompleted;
     currentTelemetry = telemetry;
+    renderHistoryWriteStatus(telemetry);
+    if (operatorAuthenticated && previousSaved !== undefined && previousSaved !== telemetry.historyWritesCompleted) {
+        void loadHistory({ preserveDetail: true });
+    }
 
     const telemetryKey = [
         telemetry.relayConnected ? 1 : 0,
@@ -1518,7 +1659,10 @@ function applyTelemetry(telemetry) {
         telemetry.relayConnectAttempts,
         telemetry.relayTimeouts,
         telemetry.relayConnectFailures,
+        telemetry.relayConnectionRefusals,
+        telemetry.relayHandshakeFailures,
         telemetry.ioErrors,
+        telemetry.relayWriteRejections,
         telemetry.gamesCompleted,
         telemetry.gamesStarted,
         telemetry.unexpectedPackets,
@@ -1527,8 +1671,9 @@ function applyTelemetry(telemetry) {
 
     document.getElementById('telemetry-bar').textContent =
         `Relay ${telemetry.relayConnectedCount}/${telemetry.relayConnectAttempts} · ` +
-        `Timeouts ${telemetry.relayTimeouts} · Failures ${telemetry.relayConnectFailures} · ` +
-        `I/O ${telemetry.ioErrors} · Games ${telemetry.gamesCompleted}/${telemetry.gamesStarted} · ` +
+        `Timeouts ${telemetry.relayTimeouts} · Failures ${telemetry.relayConnectFailures} ` +
+        `(refused ${telemetry.relayConnectionRefusals ?? 0}, handshake ${telemetry.relayHandshakeFailures ?? 0}) · ` +
+        `I/O ${telemetry.ioErrors} · Rejected writes ${telemetry.relayWriteRejections ?? 0} · Games ${telemetry.gamesCompleted}/${telemetry.gamesStarted} · ` +
         `Unexpected ${telemetry.unexpectedPackets} · State timeouts ${telemetry.stateTimeouts}`;
 
     const badge = document.getElementById('relay-badge');
@@ -1666,25 +1811,38 @@ function setChk(id, value) {
     if (element) element.checked = Boolean(value);
 }
 
-function getMaxPlayers() {
+function currentGameTypeMetadata() {
     const selectedId = parseInt(document.getElementById('game-type-select')?.value, 10);
-    const metadata = gameTypes.find(type => Number(type.id) === selectedId);
-    const declared = Number(metadata?.maxPlayers);
+    return gameTypes.find(type => Number(type.id) === selectedId);
+}
+
+function getMinPlayers() {
+    const declared = Number(currentGameTypeMetadata()?.minPlayers);
+    if (Number.isFinite(declared) && declared >= 2) return declared;
+    return isTeamGame ? Math.max(2, currentTeamCount) : 2;
+}
+
+function getMaxPlayers() {
+    const declared = Number(currentGameTypeMetadata()?.maxPlayers);
     if (Number.isFinite(declared) && declared >= 2) return declared;
     return isTeamGame ? currentTeamCount * 8 : 24;
 }
 
-function syncPlayerCountLimit(declaredMax) {
+function syncPlayerCountLimit(declaredMax, declaredMin) {
     const input = document.getElementById('player-count');
     if (!input) return;
 
-    const parsed = Number(declaredMax);
-    const max = Number.isFinite(parsed) && parsed >= 2
-        ? parsed
+    const parsedMax = Number(declaredMax);
+    const max = Number.isFinite(parsedMax) && parsedMax >= 2
+        ? parsedMax
         : (isTeamGame ? currentTeamCount * 8 : 24);
-    input.min = '2';
+    const parsedMin = Number(declaredMin);
+    const min = Number.isFinite(parsedMin) && parsedMin >= 2
+        ? Math.min(parsedMin, max)
+        : (isTeamGame ? Math.max(2, currentTeamCount) : 2);
+    input.min = String(min);
     input.max = String(max);
-    const count = clamp(parseInt(input.value, 10) || 3, 2, max);
+    const count = clamp(parseInt(input.value, 10) || Math.max(3, min), min, max);
     input.value = String(count);
 
     const existingRows = document.querySelectorAll('.player-row').length;

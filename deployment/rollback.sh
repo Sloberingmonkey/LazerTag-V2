@@ -54,8 +54,12 @@ for COMMAND in flock systemctl; do
 done
 [[ -L ${CURRENT_LINK} ]] || die 'there is no active release'
 
-exec 9>/run/lock/lazertag-deploy.lock
-flock -n 9 || die 'another deploy or rollback is already running'
+exec 9>>/run/lock/lazertag-deploy.lock
+flock -n 9 || die 'a game, pending results save, or another update is active'
+
+# The shell helper installed beside this script also handles older servers
+# which need a one-time offline cutover.
+( source /usr/local/sbin/lazertag-deploy; check_running_arena_guard )
 
 CURRENT_RELEASE=$(readlink -f -- "${CURRENT_LINK}")
 [[ ${CURRENT_RELEASE} == "${RELEASE_ROOT}"/* && -d ${CURRENT_RELEASE} ]] || die 'current release link is invalid'

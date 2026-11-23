@@ -1,6 +1,6 @@
-# LTAR Arena 2.0.0-rc.1 Release Candidate
+# LTAR Arena 2.0.0-rc.3 Release Candidate
 
-This file is the handoff record for the operations-focused Version 2 candidate.
+This file is the handoff record for the operations/gameplay-focused Version 2 candidate.
 It can be copied into another support chat to explain exactly what changed and
 how Version 1 is protected.
 
@@ -8,14 +8,19 @@ how Version 1 is protected.
 
 - The last fully hardware-verified source is preserved locally as branch
   `codex/v1-known-good` and annotated tag `v1.0.2-known-good`.
-- Version 2 work is isolated on branch `codex/v2-operations`.
-- The candidate identifies itself as `2.0.0-rc.1`; it is not a final Version 2
+- The earlier operations candidate is preserved on branch `codex/v2-operations`. The rc.3 changes are in the local working tree.
+- The candidate identifies itself as `2.0.0-rc.3`; it is not a final Version 2
   release until the physical-arena acceptance checks below pass.
-- No ESP32 firmware, IR timing, tagger protocol, debrief parser, or scoring rule
-  was changed for this candidate.
+- No ESP32 firmware, IR timing, debrief parser, or scoring rule was changed for
+  rc.2. The server-side enhanced Respawn announcement flags were corrected.
 - Nothing is pushed to GitHub or installed on the Raspberry Pi automatically.
 
 ## Candidate changes
+
+- The Pi server and Windows LAN updater ship with .NET 10. The Windows desktop host still targets .NET Framework 4.8.
+- Games hold the Pi deployment lock from Start through the last pending result save. A live update can reserve the arena between games. Upgrading a running older server requires a one-time stop during an idle window.
+- The phone and TV use server revisions to order updates, with HTTP fallback when live messages stop. The host schedules game deadlines from elapsed time and the TV displays the remaining interval sent by the server.
+- The relay bounds queued commands and matches each ESP32 reply to the transmitted signature. A rejected enhanced debrief release can retry for that player during Summary or Game Over.
 
 - Persistent, operator-only completed-game history with atomic JSON storage,
   retention, detail review, and JSON/CSV downloads.
@@ -33,8 +38,17 @@ how Version 1 is protected.
   server/state connection outage.
 - Solo snapshots and saved results use global player slots and do not expose the
   library's internal team-addressing buckets as real teams.
-- Completed-result disk writes run outside the game lifecycle gate so slow Pi SD
-  storage cannot hold up End Game, New Game, or the next lobby.
+- Completed results retry in the background after a storage failure. Recent
+  Results shows the pending saves. Hosting pauses if all 64 pending slots fill.
+- The operator now exposes the documented LTAR-native Battle, Hide & Seek, Hunt the
+  Prey, Kings, Own the Zone, Respawn, and Survival variants already present in
+  the host engine.
+- The TV/HDMI view shows objectives, Hide & Seek/Hunt role-cycle timing, and
+  zone/respawn status during play instead of presenting debrief-only hit totals
+  as if they were live telemetry.
+- Enhanced-hosted Respawn now sets the neutralize and supply-zone revive flags
+  that the standard hosted packet already used. Kings is deliberately kept on
+  standard hosting so its original IFF/King behavior is preserved.
 
 ## Hardware acceptance before promoting to Version 2
 
@@ -59,6 +73,11 @@ rollback:
    history; verify the UI remains responsive.
 8. Reboot the Pi and confirm `/healthz`, the operator page, TV page, relay, and
    saved history recover normally.
+9. Run Hide & Seek for at least four minutes and verify the taggers switch roles
+   every 60 seconds while the TV role timer stays aligned.
+10. Run Kings and verify the intended King/IFF behavior on real LTARs.
+11. Run Own the Zone and Respawn with the relay positioned as the zone emitter;
+   verify Zone Time / respawn behavior on the taggers and final debrief. For Respawn, record a known number of hits from the same attacker across two lives. Compare the taggers, TV and saved results with a single-life control before changing the scoring rule.
 
 ## Deploy and rollback
 

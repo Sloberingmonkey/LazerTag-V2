@@ -5,6 +5,8 @@ namespace LazerTagHostLibrary
 	[ImmutableObject(true)]
 	public class BinaryCodedDecimal
 	{
+		public const int MaxDecimalValue = 99;
+
 		public BinaryCodedDecimal(int value, bool binaryCoded = false)
 		{
 			DecimalValue = binaryCoded ? ToDecimal(value) : (byte) value;
@@ -37,7 +39,9 @@ namespace LazerTagHostLibrary
 
 		public static byte FromDecimal(int dec)
 		{
-			if (dec < 0 || dec >= 0xff) return 0xff;
+			if (dec == 0xff) return 0xff; // Unlimited in standard game announcements.
+			if (dec < 0 || dec > MaxDecimalValue)
+				throw new System.ArgumentOutOfRangeException(nameof(dec), dec, "Packed decimal requires a value from 0 through 99.");
 			return (byte)(((dec / 10) << 4) | (dec % 10));
 		}
 	}

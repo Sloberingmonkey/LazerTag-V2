@@ -63,8 +63,7 @@ public sealed class GameHistoryTests
             var forced = CreateRecord(Guid.NewGuid(), completedAt, "Forced") with
             {
                 Forced = true,
-                // Even if every report arrived just before the force action, the library's
-                // forced path does not run its score finalization routine.
+                // Older releases could archive both flags without calculating the scores.
                 AllPlayersDebriefed = true,
             };
             var incomplete = CreateRecord(Guid.NewGuid(), completedAt.AddSeconds(1), "Incomplete") with

@@ -779,3 +779,41 @@ input:invalid { border-color: var(--red); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* Gameplay mode guidance */
+.game-mode-info {
+  margin-top: 10px;
+  padding: 10px 11px;
+  background: rgba(84, 167, 255, .07);
+  border: 1px solid rgba(84, 167, 255, .22);
+  border-radius: 8px;
+}
+.game-mode-info-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 9px;
+  color: #dce8f6;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.mode-code {
+  min-width: 44px;
+  padding: 2px 6px;
+  text-align: center;
+  color: #8bc7ff;
+  background: rgba(84, 167, 255, .1);
+  border: 1px solid rgba(84, 167, 255, .28);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: .08em;
+}
+.game-mode-note {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.mode-standard-note { color: #ffd17a; }
+.mode-disabled-control { opacity: .48 !important; }

@@ -53,25 +53,42 @@ public class PlannedPlayerRequest
 /// <summary>Diagnostic counters broadcast on every tick.</summary>
 public record TelemetrySnapshot
 {
+    public string ServerInstance { get; init; } = "";
+    public long Revision { get; init; }
     public bool RelayConnected       { get; init; }
     public int  RelayConnectedCount  { get; init; }
     public int  RelayConnectAttempts { get; init; }
     public int  RelayTimeouts        { get; init; }
     public int  RelayConnectFailures { get; init; }
+    public int  RelayConnectionRefusals { get; init; }
+    public int  RelayHandshakeFailures  { get; init; }
+    public int RelayWriteRejections { get; init; }
     public int  IoErrors             { get; init; }
     public int  UnexpectedPackets    { get; init; }
     public int  StateTimeouts        { get; init; }
     public int  GamesStarted         { get; init; }
     public int  GamesCompleted       { get; init; }
+    public int  PendingHistoryWrites { get; init; }
+    public int  RetryingHistoryWrites { get; init; }
+    public int  HistoryWritesCompleted { get; init; }
 }
 
 /// <summary>Full game state snapshot sent to all clients on every state change.</summary>
 public class GameStateSnapshot
 {
+    public string ServerInstance { get; init; } = "";
+    public long Revision { get; init; }
+    public string? GameId        { get; set; }
     public string State          { get; set; } = "Idle";
     public string HostingState   { get; set; } = "Idle";
     public int    GameTypeId     { get; set; }
+    public string GameTypeCode   { get; set; } = "";
     public string GameTypeLabel  { get; set; } = "";
+    public string GameObjective  { get; set; } = "";
+    public string GameOperatorNote { get; set; } = "";
+    public int    RoleCycleSeconds { get; set; }
+    public bool   ReverseHuntDirection { get; set; }
+    public bool   RequiresStandardHosting { get; set; }
     public bool   IsTeamGame     { get; set; }
     public int    TeamCount      { get; set; }
     public int    PlannedPlayerCount { get; set; }
@@ -84,6 +101,7 @@ public class GameStateSnapshot
     // Timer data - TV uses these to sync its countdown/game clock after late connect
     public int  CountdownSeconds     { get; set; } = 30;
     public int  GameMinutes          { get; set; } = 10;
+    public long? PhaseRemainingMs { get; set; }
     public long ServerTimeMs         { get; set; }
     public long CountdownStartedAtMs { get; set; }
     public long GameStartedAtMs      { get; set; }
@@ -112,6 +130,7 @@ public class PlayerSnapshot
     public int Rank         { get; set; }
 
     public int  TaggerId     { get; set; }
+    public bool Dropped      { get; set; }
     public bool AllDebriefed { get; set; }
 }
 

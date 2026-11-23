@@ -1,12 +1,13 @@
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Ports;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace LazerTagHostLibrary
 {
@@ -26,12 +27,18 @@ namespace LazerTagHostLibrary
         private const int TcpWriteTimeoutMs = 2000;
         private const int WorkerJoinTimeoutMs = 500;
         private const int HandshakeTimeoutMs = 2000;
+        private const int MaxRelayLineLength = 1024;
         private const string ProtocolHello = "HELLO 1\r\n";
         private const string ProtocolReady = "READY 1";
         private const string ProtocolPong = "PONG";
+        private static readonly byte[] Ping = Encoding.ASCII.GetBytes("PING\r\n");
+        private static readonly TimeSpan PingAfterIdle = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan PingResponseTimeout = TimeSpan.FromSeconds(5);
 
         private readonly object _stateLock = new object();
-        private readonly BlockingCollection<byte[]> _writeQueue;
+        private readonly object _connectionLock = new object();
+        private readonly Action<HostDiagnostic> _reportDiagnostic;
+        private RelayOutbox _outbox;
 
         private string _portName;
         private bool _isTcp;
@@ -46,10 +53,13 @@ namespace LazerTagHostLibrary
         private CancellationTokenSource _workerCts;
 
         private bool _disposed;
+        private Task<bool> _reconnectTask;
 
-        public LazerTagSerial()
+        public LazerTagSerial() : this(null) { }
+
+        public LazerTagSerial(Action<HostDiagnostic> reportDiagnostic)
         {
-            _writeQueue = new BlockingCollection<byte[]>();
+            _reportDiagnostic = reportDiagnostic;
         }
 
         ~LazerTagSerial()
@@ -97,13 +107,7 @@ namespace LazerTagHostLibrary
             {
             }
 
-            try
-            {
-                _writeQueue?.Dispose();
-            }
-            catch
-            {
-            }
+
         }
 
         public static string[] GetSerialPorts()
@@ -144,6 +148,11 @@ namespace LazerTagHostLibrary
 
         public bool Connect(string portName)
         {
+            lock (_connectionLock) return ConnectCore(portName);
+        }
+
+        private bool ConnectCore(string portName)
+        {
             if (string.IsNullOrWhiteSpace(portName))
             {
                 return false;
@@ -156,14 +165,14 @@ namespace LazerTagHostLibrary
 
             try
             {
-                Disconnect();
-
+                DisconnectCore();
                 lock (_stateLock)
                 {
                     _portName = portName;
                     _isTcp = IsTcpAddress(portName);
                     _readBuffer = string.Empty;
                     _workerCts = new CancellationTokenSource();
+                    _outbox = new RelayOutbox();
                 }
 
                 if (_isTcp)
@@ -175,8 +184,9 @@ namespace LazerTagHostLibrary
             }
             catch (Exception ex)
             {
+                if (!_isTcp) _reportDiagnostic?.Invoke(HostDiagnostic.RelayConnectFailed);
                 Log.Add("Connect() failed.", ex);
-                Disconnect();
+                DisconnectCore();
                 return false;
             }
         }
@@ -220,22 +230,34 @@ namespace LazerTagHostLibrary
                     if (_disposed) return false;
                 }
 
+                _reportDiagnostic?.Invoke(HostDiagnostic.RelayConnectAttempt);
+                HostDiagnostic outcome;
                 try
                 {
-                    if (ConnectTcpOnce(address))
-                    {
-                        if (attempt > 1)
-                        {
-                            Log.Add(Log.Severity.Information, "TCP relay connected on attempt {0}.", attempt);
-                        }
-
-                        return true;
-                    }
+                    outcome = ConnectTcpOnce(address);
                 }
                 catch (Exception ex)
                 {
+                    outcome = ex switch
+                    {
+                        SocketException { SocketErrorCode: SocketError.ConnectionRefused } => HostDiagnostic.RelayConnectionRefused,
+                        _ when IsSocketTimeoutException(ex) => HostDiagnostic.RelayConnectTimeout,
+                        _ => HostDiagnostic.RelayConnectFailed
+                    };
                     Log.Add(Log.Severity.Warning, "TCP connect attempt {0} failed: {1}", attempt, ex.Message);
                     CloseTcpObjects();
+                }
+
+                lock (_stateLock)
+                {
+                    if (_disposed) return false;
+                }
+                _reportDiagnostic?.Invoke(outcome);
+                if (outcome == HostDiagnostic.RelayConnected)
+                {
+                    if (attempt > 1)
+                        Log.Add(Log.Severity.Information, "TCP relay connected on attempt {0}.", attempt);
+                    return true;
                 }
 
                 if (attempt < TcpConnectRetryCount)
@@ -247,7 +269,7 @@ namespace LazerTagHostLibrary
             return false;
         }
 
-        private bool ConnectTcpOnce(string address)
+        private HostDiagnostic ConnectTcpOnce(string address)
         {
             string host = address;
             int port = TcpDefaultPort;
@@ -272,7 +294,7 @@ namespace LazerTagHostLibrary
                     {
                         try { tcpClient.Close(); } catch { }
                         Log.Add(Log.Severity.Warning, "TCP connection timed out to {0}:{1}", host, port);
-                        return false;
+                        return HostDiagnostic.RelayConnectTimeout;
                     }
 
                     tcpClient.EndConnect(connectResult);
@@ -290,12 +312,23 @@ namespace LazerTagHostLibrary
                 tcpStream.ReadTimeout = HandshakeTimeoutMs;
                 tcpStream.WriteTimeout = TcpWriteTimeoutMs;
 
-                if (!PerformHandshake(tcpStream))
+                var lines = new RelayLines();
+                HostDiagnostic handshake;
+                try
+                {
+                    handshake = PerformHandshake(tcpStream, lines);
+                }
+                catch (IOException ex)
+                {
+                    Log.Add(Log.Severity.Warning, "TCP relay handshake I/O failed: {0}", ex.Message);
+                    handshake = IsSocketTimeoutException(ex) ? HostDiagnostic.RelayHandshakeTimeout : HostDiagnostic.RelayHandshakeFailed;
+                }
+                if (handshake != HostDiagnostic.RelayConnected)
                 {
                     try { tcpStream.Close(); } catch { }
                     try { tcpClient.Close(); } catch { }
                     Log.Add(Log.Severity.Warning, "TCP relay handshake failed at {0}:{1}", host, port);
-                    return false;
+                    return handshake;
                 }
 
                 tcpStream.ReadTimeout = TcpReadTimeoutMs;
@@ -306,13 +339,13 @@ namespace LazerTagHostLibrary
                     {
                         try { tcpStream.Close(); } catch { }
                         try { tcpClient.Close(); } catch { }
-                        return false;
+                        return HostDiagnostic.RelayConnectFailed;
                     }
 
                     _tcpClient = tcpClient;
                     _tcpStream = tcpStream;
 
-                    StartTcpReadThread_NoLock();
+                    StartTcpReadThread_NoLock(tcpStream, lines);
                     StartWriteThread_NoLock();
                 }
             }
@@ -323,20 +356,50 @@ namespace LazerTagHostLibrary
             }
 
             Log.Add(Log.Severity.Information, "TCP relay connected at {0}:{1}", host, port);
-            return true;
+            return HostDiagnostic.RelayConnected;
         }
 
-        private bool PerformHandshake(NetworkStream tcpStream)
+        // One instance follows a socket from HELLO through disconnect. READY may
+        // share a read with complete IR lines and the start of the next line.
+        private sealed class RelayLines
+        {
+            private readonly Queue<string> _complete = new Queue<string>();
+            private readonly StringBuilder _partial = new StringBuilder();
+
+            public void Append(byte[] bytes, int count)
+            {
+                foreach (var c in Encoding.ASCII.GetString(bytes, 0, count))
+                {
+                    if (c != '\r' && c != '\n')
+                    {
+                        if (_partial.Length >= MaxRelayLineLength) throw new IOException("Relay line exceeds the protocol limit.");
+                        _partial.Append(c);
+                    }
+                    else if (_partial.Length > 0)
+                    {
+                        _complete.Enqueue(_partial.ToString());
+                        _partial.Clear();
+                    }
+                }
+            }
+
+            public bool TryRead(out string line)
+            {
+                line = _complete.Count == 0 ? null : _complete.Dequeue();
+                return line != null;
+            }
+        }
+
+        private HostDiagnostic PerformHandshake(NetworkStream tcpStream, RelayLines lines)
         {
             byte[] helloBytes = Encoding.ASCII.GetBytes(ProtocolHello);
             tcpStream.Write(helloBytes, 0, helloBytes.Length);
             tcpStream.Flush();
 
-            DateTime deadline = DateTime.UtcNow.AddMilliseconds(HandshakeTimeoutMs);
-            string handshakeBuffer = string.Empty;
+            var handshakeTimer = Stopwatch.StartNew();
             var buf = new byte[128];
 
-            while (DateTime.UtcNow < deadline)
+            while (handshakeTimer.ElapsedMilliseconds < HandshakeTimeoutMs)
             {
                 int n;
                 try
@@ -355,17 +418,15 @@ namespace LazerTagHostLibrary
 
                 if (n <= 0)
                 {
-                    return false;
+                    return HostDiagnostic.RelayHandshakeFailed;
                 }
 
-                handshakeBuffer += Encoding.ASCII.GetString(buf, 0, n);
-                string remainingBuffer;
-                foreach (var line in SplitBufferLines(handshakeBuffer, out remainingBuffer))
+                lines.Append(buf, n);
+                while (lines.TryRead(out var line))
                 {
-                    handshakeBuffer = remainingBuffer;
                     if (string.Equals(line, ProtocolReady, StringComparison.OrdinalIgnoreCase))
                     {
-                        return true;
+                        return HostDiagnostic.RelayConnected;
                     }
 
                     if (string.Equals(line, ProtocolPong, StringComparison.OrdinalIgnoreCase))
@@ -376,17 +437,22 @@ namespace LazerTagHostLibrary
                     if (line.StartsWith("ERROR", StringComparison.OrdinalIgnoreCase))
                     {
                         Log.Add(Log.Severity.Warning, "TCP relay handshake error: {0}", line);
-                        return false;
+                        return HostDiagnostic.RelayHandshakeFailed;
                     }
 
                     // Ignore any unexpected line during handshake rather than surfacing it.
                 }
             }
 
-            return false;
+            return HostDiagnostic.RelayHandshakeTimeout;
         }
 
         public void Disconnect()
+        {
+            lock (_connectionLock) DisconnectCore();
+        }
+
+        private void DisconnectCore()
         {
             CancellationTokenSource workerCts;
             Thread writeThread;
@@ -395,6 +461,8 @@ namespace LazerTagHostLibrary
 
             lock (_stateLock)
             {
+                _outbox?.Close();
+                _outbox = null;
                 workerCts = _workerCts;
                 _workerCts = null;
 
@@ -462,7 +530,7 @@ namespace LazerTagHostLibrary
             {
             }
 
-            DrainWriteQueue();
+
         }
 
         private void CloseTcpObjects()
@@ -508,45 +576,51 @@ namespace LazerTagHostLibrary
             }
         }
 
-        private void DrainWriteQueue()
-        {
-            byte[] ignored;
-            while (_writeQueue.TryTake(out ignored, 0))
-            {
-            }
-        }
-
         public void Enqueue(byte[] bytes)
         {
-            if (bytes == null || bytes.Length == 0)
-            {
-                return;
-            }
+            if (bytes == null || bytes.Length == 0) return;
+            int responses = 0;
+            for (int i = 0; i + 3 < bytes.Length; i++)
+                if ((i == 0 || bytes[i - 1] == '\n' || bytes[i - 1] == '\r') &&
+                    bytes[i] == 'C' && bytes[i + 1] == 'M' && bytes[i + 2] == 'D' && bytes[i + 3] == ' ')
+                    responses++;
+            TryEnqueue(bytes, responses, 2000);
+        }
 
+        internal bool TryEnqueue(byte[] bytes, int responses, int lifetimeMs, TaskCompletionSource<bool> receipt = null)
+        {
+            bool reconnect;
             lock (_stateLock)
             {
-                if (_disposed) return;
+                reconnect = !_disposed && !IsConnected;
+                if (!reconnect && !_disposed && _outbox != null && _outbox.TryQueue(bytes, responses, lifetimeMs, receipt))
+                    return true;
             }
+            receipt?.TrySetResult(false);
+            _reportDiagnostic?.Invoke(HostDiagnostic.RelayWriteRejected);
+            if (reconnect) _ = EnsureConnectedAsync();
+            return false;
+        }
 
-            if (!IsConnected)
+        public Task<bool> EnsureConnectedAsync()
+        {
+            lock (_stateLock)
             {
-                if (string.IsNullOrWhiteSpace(_portName))
+                if (_disposed || string.IsNullOrWhiteSpace(_portName)) return Task.FromResult(false);
+                if (IsConnected) return Task.FromResult(true);
+                if (_reconnectTask != null && !_reconnectTask.IsCompleted) return _reconnectTask;
+
+                // Writes, the operator and the reconnect timer all share this handshake.
+                var portName = _portName;
+                _reconnectTask = Task.Run(() =>
                 {
-                    return;
-                }
-
-                if (!Connect(_portName))
-                {
-                    return;
-                }
-            }
-
-            try
-            {
-                _writeQueue.Add(bytes);
-            }
-            catch (InvalidOperationException)
-            {
+                    lock (_connectionLock)
+                    {
+                        if (portName != _portName) return false;
+                        return IsConnected || ConnectCore(portName);
+                    }
+                });
+                return _reconnectTask;
             }
         }
 
@@ -555,20 +629,26 @@ namespace LazerTagHostLibrary
             if (_workerCts == null) return;
             if (_writeThread != null && _writeThread.IsAlive) return;
 
-            _writeThread = new Thread(WriteThreadProc)
+            var token = _workerCts.Token;
+            var outbox = _outbox;
+            var stream = _tcpStream;
+            var serialPort = _serialPort;
+            _writeThread = new Thread(() => WriteThreadProc(token, outbox, stream, serialPort))
             {
                 IsBackground = true,
-                Name = _isTcp ? "TcpWrite" : "SerialWrite"
+                Name = stream != null ? "TcpWrite" : "SerialWrite"
             };
             _writeThread.Start();
         }
 
-        private void StartTcpReadThread_NoLock()
+        private void StartTcpReadThread_NoLock(NetworkStream stream, RelayLines lines)
         {
             if (_workerCts == null) return;
             if (_tcpReadThread != null && _tcpReadThread.IsAlive) return;
 
-            _tcpReadThread = new Thread(TcpReadThreadProc)
+            var token = _workerCts.Token;
+            var outbox = _outbox;
+            _tcpReadThread = new Thread(() => TcpReadThreadProc(stream, lines, outbox, token))
             {
                 IsBackground = true,
                 Name = "TcpRead"
@@ -576,106 +656,65 @@ namespace LazerTagHostLibrary
             _tcpReadThread.Start();
         }
 
-        private void WriteThreadProc()
+        private void WriteThreadProc(CancellationToken token, RelayOutbox outbox, NetworkStream stream, SerialPort serialPort)
         {
-            CancellationToken token;
-            bool isTcp;
-
-            lock (_stateLock)
-            {
-                token = _workerCts != null ? _workerCts.Token : CancellationToken.None;
-                isTcp = _isTcp;
-            }
-
+            RelayOutbox.Write write = null;
             try
             {
                 while (!token.IsCancellationRequested)
                 {
-                    byte[] data;
-                    if (!_writeQueue.TryTake(out data, 100, token))
+                    if (stream != null) outbox.CheckReplyDeadline();
+                    if (!outbox.TryTake(out write, token)) continue;
+                    if (!outbox.BeginWrite(write, stream != null))
                     {
+                        _reportDiagnostic?.Invoke(HostDiagnostic.RelayWriteRejected);
                         continue;
                     }
 
-                    if (data == null || data.Length == 0)
+                    if (stream != null)
                     {
-                        continue;
-                    }
-
-                    if (isTcp)
-                    {
-                        NetworkStream stream;
-                        lock (_stateLock)
-                        {
-                            stream = _tcpStream;
-                        }
-
-                        if (stream == null)
-                        {
-                            throw new IOException("TCP stream is not available.");
-                        }
-
-                        stream.Write(data, 0, data.Length);
+                        stream.Write(write.Bytes, 0, write.Bytes.Length);
                         stream.Flush();
                     }
                     else
                     {
-                        SerialPort serialPort;
-                        lock (_stateLock)
-                        {
-                            serialPort = _serialPort;
-                        }
-
-                        if (serialPort == null || !serialPort.IsOpen)
-                        {
-                            throw new IOException("Serial port is not open.");
-                        }
-
-                        serialPort.Write(data, 0, data.Length);
+                        serialPort.Write(write.Bytes, 0, write.Bytes.Length);
                         serialPort.BaseStream.Flush();
+                        write.Receipt?.TrySetResult(true);
                         Thread.Sleep(InterSignatureDelayMilliseconds);
                     }
                 }
             }
-            catch (OperationCanceledException)
-            {
-            }
-            catch (ThreadInterruptedException)
-            {
-            }
+            catch (OperationCanceledException) { }
+            catch (ThreadInterruptedException) { }
             catch (Exception ex)
             {
-                HandleTransportFailure("WriteThreadProc()", ex);
+                write?.Receipt?.TrySetResult(false);
+                HandleTransportFailure("WriteThreadProc()", ex, token);
             }
         }
 
-        private void TcpReadThreadProc()
+        private void TcpReadThreadProc(NetworkStream stream, RelayLines lines, RelayOutbox outbox, CancellationToken token)
         {
-            CancellationToken token;
-
-            lock (_stateLock)
-            {
-                token = _workerCts != null ? _workerCts.Token : CancellationToken.None;
-            }
-
             try
             {
                 var buf = new byte[256];
+                var idle = Stopwatch.StartNew();
+                bool pingPending = false;
 
                 while (!token.IsCancellationRequested)
                 {
-                    NetworkStream stream;
-                    TcpClient client;
-
-                    lock (_stateLock)
+                    while (lines.TryRead(out var line))
                     {
-                        stream = _tcpStream;
-                        client = _tcpClient;
-                    }
-
-                    if (stream == null || client == null)
-                    {
-                        break;
+                        if (line == "OK") outbox.Reply(true);
+                        else if (line.StartsWith("ERROR", StringComparison.Ordinal))
+                        {
+                            outbox.Reply(false);
+                            _reportDiagnostic?.Invoke(HostDiagnostic.RelayWriteRejected);
+                        }
+                        if (!string.Equals(line, ProtocolReady, StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(line, ProtocolPong, StringComparison.OrdinalIgnoreCase))
+                            OnDataReceived(new DataReceivedEventArgs(line, token));
                     }
 
                     int n;
@@ -683,14 +722,17 @@ namespace LazerTagHostLibrary
                     {
                         n = stream.Read(buf, 0, buf.Length);
                     }
-                    catch (IOException ioEx)
+                    catch (IOException ioEx) when (IsSocketTimeoutException(ioEx))
                     {
-                        if (IsSocketTimeoutException(ioEx))
+                        if (pingPending && idle.Elapsed >= PingResponseTimeout)
+                            throw new IOException("The relay did not respond to PING.", ioEx);
+                        if (!pingPending && idle.Elapsed >= PingAfterIdle)
                         {
-                            continue;
+                            if (!outbox.TryQueue(Ping, 0, 1000)) throw new IOException("Relay output queue is full.");
+                            pingPending = true;
+                            idle.Restart();
                         }
-
-                        throw;
+                        continue;
                     }
 
                     if (n <= 0)
@@ -698,20 +740,9 @@ namespace LazerTagHostLibrary
                         throw new IOException("TCP stream closed by remote host.");
                     }
 
-                    _readBuffer += Encoding.ASCII.GetString(buf, 0, n);
-                    string remainingBuffer;
-                    foreach (var line in SplitBufferLines(_readBuffer, out remainingBuffer))
-                    {
-                        _readBuffer = remainingBuffer;
-
-                        if (string.Equals(line, ProtocolReady, StringComparison.OrdinalIgnoreCase) ||
-                            string.Equals(line, ProtocolPong, StringComparison.OrdinalIgnoreCase))
-                        {
-                            continue;
-                        }
-
-                        OnDataReceived(new DataReceivedEventArgs(line));
-                    }
+                    idle.Restart();
+                    pingPending = false;
+                    lines.Append(buf, n);
                 }
             }
             catch (OperationCanceledException)
@@ -719,14 +750,7 @@ namespace LazerTagHostLibrary
             }
             catch (Exception ex)
             {
-                if (IsExpectedDisconnectException(ex))
-                {
-                    Log.Add(Log.Severity.Debug, "TcpReadThread(): socket closed (expected disconnect).");
-                }
-                else
-                {
-                    HandleTransportFailure("TcpReadThread()", ex);
-                }
+                HandleTransportFailure("TcpReadThread()", ex, token);
             }
         }
 
@@ -737,27 +761,30 @@ namespace LazerTagHostLibrary
 
         private void SerialDataReceived(object sender, SerialDataReceivedEventArgs e)
         {
+            CancellationToken token;
             SerialPort serialPort;
             lock (_stateLock)
             {
                 serialPort = _serialPort;
+                if (sender != serialPort || serialPort == null) return;
+                token = _workerCts.Token;
             }
-
-            if (sender != serialPort || serialPort == null) return;
 
             try
             {
                 _readBuffer += serialPort.ReadExisting();
-                string remainingBuffer;
-                foreach (var line in SplitBufferLines(_readBuffer, out remainingBuffer))
+                var lines = SplitBufferLines(_readBuffer, out var remainingBuffer);
+                if (remainingBuffer.Length > MaxRelayLineLength) throw new IOException("Serial relay line exceeds the protocol limit.");
+                _readBuffer = remainingBuffer;
+                foreach (var line in lines)
                 {
-                    _readBuffer = remainingBuffer;
-                    OnDataReceived(new DataReceivedEventArgs(line));
+                    if (line.Length > MaxRelayLineLength) throw new IOException("Serial relay line exceeds the protocol limit.");
+                    OnDataReceived(new DataReceivedEventArgs(line, token));
                 }
             }
             catch (Exception ex)
             {
-                HandleTransportFailure("SerialDataReceived()", ex);
+                HandleTransportFailure("SerialDataReceived()", ex, token);
             }
         }
 
@@ -766,50 +793,23 @@ namespace LazerTagHostLibrary
             Log.Add(Log.Severity.Debug, "SerialErrorReceived(): {0}", e.EventType);
         }
 
-        private void HandleTransportFailure(string context, Exception ex)
+        private void HandleTransportFailure(string context, Exception ex, CancellationToken token)
         {
-            if (ex == null) return;
-
-            if (IsExpectedDisconnectException(ex))
+            if (token.IsCancellationRequested) return;
+            lock (_connectionLock)
             {
-                Log.Add(Log.Severity.Debug, "{0} socket closed (expected disconnect).", context);
+                // A late failure from an old reader or writer must not close its replacement.
+                if (token.IsCancellationRequested) return;
+                DisconnectCore();
             }
-            else
-            {
-                Log.Add(context + " failed.", ex);
-                OnIoError(new IoErrorEventArgs(null, ex));
-            }
-
-            try
-            {
-                Disconnect();
-            }
-            catch
-            {
-            }
+            Log.Add(context + " failed.", ex);
+            OnIoError(new IoErrorEventArgs(null, ex));
         }
 
         private static bool IsSocketTimeoutException(Exception ex)
         {
-            if (ex == null) return false;
-
-            var ioEx = ex as IOException;
-            if (ioEx != null)
-            {
-                var innerSocketEx = ioEx.InnerException as SocketException;
-                if (innerSocketEx != null)
-                {
-                    return innerSocketEx.SocketErrorCode == SocketError.TimedOut;
-                }
-            }
-
-            var socketEx = ex as SocketException;
-            if (socketEx != null)
-            {
-                return socketEx.SocketErrorCode == SocketError.TimedOut;
-            }
-
-            return false;
+            var socketError = ex as SocketException ?? (ex as IOException)?.InnerException as SocketException;
+            return socketError?.SocketErrorCode is SocketError.TimedOut or SocketError.WouldBlock;
         }
 
         private static bool IsExpectedDisconnectException(Exception ex)
@@ -906,10 +906,15 @@ namespace LazerTagHostLibrary
 
         public class DataReceivedEventArgs : EventArgs
         {
-            public DataReceivedEventArgs(string data)
+            public DataReceivedEventArgs(string data) : this(data, CancellationToken.None) { }
+
+            internal DataReceivedEventArgs(string data, CancellationToken connection)
             {
                 Data = data;
+                Connection = connection;
             }
+
+            internal CancellationToken Connection { get; }
 
             public string Data { get; set; }
         }

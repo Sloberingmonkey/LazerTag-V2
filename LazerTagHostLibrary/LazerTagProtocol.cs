@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace LazerTagHostLibrary
 {
@@ -8,23 +10,20 @@ namespace LazerTagHostLibrary
 	{
 		#region Constructors/Destructor
 
-		public LazerTagProtocol(HostGun hostGun, string portName)
+		public LazerTagProtocol(HostGun hostGun, string portName) : this(hostGun, portName, null) { }
+
+		internal LazerTagProtocol(HostGun hostGun, string portName, Action<HostDiagnostic> reportDiagnostic)
 		{
 			_hostGun = hostGun;
-			_serial = new LazerTagSerial();
+			_serial = new LazerTagSerial(reportDiagnostic);
 			_serial.IoError += Serial_IoError;
 			_serial.DataReceived += Serial_DataReceived;
-			_serial.Connect(portName);
-			_serial.Enqueue(new[] {(byte) '\r', (byte) '\n'});
+			if (_serial.Connect(portName)) _serial.Enqueue(new[] {(byte) '\r', (byte) '\n'});
 		}
 
 		public void Dispose()
 		{
-			if (_serial != null)
-			{
-				_serial.Disconnect();
-				_serial.Dispose();
-			}
+			_serial.Dispose();
 		}
 
 		#endregion
@@ -40,9 +39,11 @@ namespace LazerTagHostLibrary
 		/// <summary>True when the underlying transport connection is currently open.</summary>
 		public bool IsConnected => _serial != null && _serial.IsConnected;
 
+		public Task<bool> EnsureConnectedAsync() => _serial.EnsureConnectedAsync();
+
 		public void TransmitSignature(Signature signature)
 		{
-			_serial.Enqueue(EncodeSignature(signature));
+			_serial.TryEnqueue(EncodeSignature(signature), 1, signature.Type == SignatureType.Beacon ? 250 : 1000);
 		}
 
 		public void TransmitSignature(IEnumerable<Signature> signatures)
@@ -53,11 +54,20 @@ namespace LazerTagHostLibrary
 			}
 		}
 
-		public void TransmitPacket(Packet packet)
-		{
+		public void TransmitPacket(Packet packet) => QueuePacket(packet, null);
+
+        internal Task<bool> TransmitConfirmedAsync(Packet packet)
+        {
+            var receipt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            QueuePacket(packet, receipt);
+            return receipt.Task;
+        }
+
+        private void QueuePacket(Packet packet, TaskCompletionSource<bool> receipt)
+        {
 			var e = new PacketSendingEventArgs(packet);
 			OnPacketSending(e);
-			if (e.Cancel) return;
+			if (e.Cancel) { receipt?.TrySetResult(false); return; }
 
 			Log.Add(Log.Severity.Debug, "TX {0}: {1}", packet.Type.ToString(), packet);
 
@@ -67,7 +77,9 @@ namespace LazerTagHostLibrary
 			//   - one 50ms sleep per signature in the serial write thread (650ms total)
 			//   - one TCP write call per signature over WiFi
 			// Now the whole packet is one allocation, one queue entry, one TCP write.
-			_serial.Enqueue(EncodePacket(packet));
+			var bytes = EncodePacket(packet, out int responses);
+            bool countdown = packet.Type == PacketType.AnnounceCountdown || packet.Type == PacketType.AnnounceCountdownEnhanced;
+            _serial.TryEnqueue(bytes, responses, countdown ? 1000 : 2000, receipt);
 		}
 
 		public void SendTag(TeamPlayerId teamPlayerId, int damage)
@@ -131,10 +143,20 @@ namespace LazerTagHostLibrary
 		{
 			if (e.Data == null) return;
 
-			foreach (var fragment in SplitSerialFragments(e.Data))
+			lock (_receiveLock)
 			{
-				if (string.IsNullOrWhiteSpace(fragment)) continue;
-				ProcessSerialFragment(fragment.Trim());
+				if (e.Connection.IsCancellationRequested) return;
+				if (e.Connection != _inputConnection)
+				{
+					_incomingPacket = null;
+					_orphanData.Clear();
+					_inputConnection = e.Connection;
+                    _discardingOversizePacket = false;
+				}
+				foreach (var fragment in SplitSerialFragments(e.Data))
+				{
+					if (!string.IsNullOrWhiteSpace(fragment)) ProcessSerialFragment(fragment.Trim());
+				}
 			}
 		}
 
@@ -195,7 +217,7 @@ namespace LazerTagHostLibrary
 					// benign relay chatter; do not treat as unrecognized noise
 					break;
 				case "ERROR":
-					Log.Add(Log.Severity.Debug, fragment);
+					Log.Add(Log.Severity.Warning, fragment);
 					break;
 				default:
 					Log.Add(Log.Severity.Debug, $"Received unrecognized response, '{fragment}'.");
@@ -358,8 +380,16 @@ namespace LazerTagHostLibrary
 			}
 		}
 
-		private void ProcessDataSignature(UInt16 data, byte bitCount)
-		{
+		private bool _discardingOversizePacket;
+
+        private void ProcessDataSignature(UInt16 data, byte bitCount)
+        {
+            if (_discardingOversizePacket)
+            {
+                if (bitCount != 9) return;
+                _discardingOversizePacket = false;
+                if ((data & 0x100) != 0) return;
+            }
 			if (bitCount == 9)
 			{
 				if ((data & 0x100) == 0) // packet type
@@ -422,7 +452,15 @@ namespace LazerTagHostLibrary
 					return;
 				}
 
-				_incomingPacket.Data.Add(new Signature(SignatureType.Data, data));
+				if (_incomingPacket.Data.Count >= 256)
+                {
+                    _incomingPacket = null;
+                    _orphanData.Clear();
+                    _discardingOversizePacket = true;
+                    Log.Add(Log.Severity.Warning, "Discarded an oversized IR packet.");
+                    return;
+                }
+                _incomingPacket.Data.Add(new Signature(SignatureType.Data, data));
 			}
 			else if (bitCount == 7) // tag
 			{
@@ -509,9 +547,10 @@ namespace LazerTagHostLibrary
 		/// entire packet is enqueued and written as a single operation.
 		/// Avoids one allocation + one queue entry + one TCP write per signature.
 		/// </summary>
-		private static byte[] EncodePacket(Packet packet)
+		private static byte[] EncodePacket(Packet packet, out int responses)
 		{
-			var signatures = packet.Signatures; // one List alloc here - acceptable, packet is being sent
+			var signatures = packet.Signatures;
+            responses = signatures.Count; // one List alloc here - acceptable, packet is being sent
 			// Pre-size: each CMD line is at most 24 bytes ("CMD 10 1FF F 1\r\n" = 16 chars max)
 			var sb = new StringBuilder(signatures.Count * 20);
 			foreach (var sig in signatures)
@@ -545,6 +584,8 @@ namespace LazerTagHostLibrary
 
 		private readonly LazerTagSerial _serial;
 		private readonly HostGun _hostGun;
+		private readonly object _receiveLock = new object();
+		private CancellationToken _inputConnection;
 		private Packet _incomingPacket;
 		private readonly List<Signature> _orphanData = new List<Signature>();
 

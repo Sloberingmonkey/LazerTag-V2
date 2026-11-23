@@ -90,6 +90,22 @@
 
   #phase-playing { flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 20px 88px; }
   #playing-label { font-size: 26px; font-weight: 800; color: var(--green); letter-spacing: .15em; }
+  #playing-mode { max-width: 1020px; text-align: center; }
+  #playing-mode-name { font-size: 30px; font-weight: 950; color: var(--accent); letter-spacing: .04em; }
+  #playing-objective { margin-top: 5px; font-size: 17px; color: #c2ccda; line-height: 1.35; }
+  #playing-cycle {
+    display: none;
+    margin-top: 12px;
+    padding: 8px 18px;
+    color: var(--amber);
+    background: rgba(255,189,71,.08);
+    border: 1px solid rgba(255,189,71,.34);
+    border-radius: 999px;
+    font-size: 20px;
+    font-weight: 900;
+    letter-spacing: .06em;
+  }
+  #playing-cycle.active { display: inline-block; }
   #playing-clock { font-size: clamp(112px, 13vw, 164px); font-weight: 950; line-height: .95; letter-spacing: .03em; }
   #playing-clock.urgent { color: var(--red); }
   #playing-players { max-width: 1120px; display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
@@ -105,10 +121,12 @@
   .debrief-card { min-width: 190px; padding: 18px 28px; text-align: center; background: var(--panel); border: 2px solid var(--border); border-radius: 12px; }
   .debrief-card.done { border-color: var(--green); }
   .debrief-card.waiting { border-color: var(--amber); }
+  .debrief-card.dropped { border-color: var(--muted); opacity: .72; }
   .debrief-card-name { margin-bottom: 7px; font-size: 22px; font-weight: 750; }
   .debrief-card-status { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; }
   .debrief-card.done .debrief-card-status { color: var(--green); }
   .debrief-card.waiting .debrief-card-status { color: var(--amber); }
+  .debrief-card.dropped .debrief-card-status { color: var(--muted); }
 
   #phase-scores {
     flex-direction: column;
@@ -285,6 +303,11 @@
 
   <section class="phase" id="phase-playing">
     <div id="playing-label">● GAME IN PROGRESS</div>
+    <div id="playing-mode">
+      <div id="playing-mode-name">LAZER TAG</div>
+      <div id="playing-objective">Game data is stored on the taggers and reported after play.</div>
+      <div id="playing-cycle"></div>
+    </div>
     <div id="playing-clock">0:00</div>
     <div id="playing-players"></div>
   </section>
@@ -317,15 +340,18 @@
 </div>
 
 <script src="/js/signalr.min.js"></script>
+<script src="/js/snapshots.js"></script>
 <script>
 'use strict';
 
+const snapshotOrder = new ArenaSnapshotOrder();
 const connection = new signalR.HubConnectionBuilder()
     .withUrl('/gamehub')
     .withAutomaticReconnect([0, 2000, 5000, 10000])
     .build();
 
 let currentPhase = 'idle';
+let latestSnapshot = null;
 let phaseStartMs = 0;
 let phaseTotalSecs = 0;
 let timerId = null;
@@ -335,13 +361,14 @@ let refreshTimer = null;
 let connectionWatchdogTimer = null;
 let relayAlertTimer = null;
 let lastRelayConnected = null;
-let lastStateUpdateMs = Date.now();
+let lastStateUpdateMs = performance.now();
 const stateStaleAfterMs = 14000;
 const relayOfflineGraceMs = 4000;
 const playingCards = new Map();
 
 connection.on('State', snapshot => applyState(snapshot));
 connection.on('Telemetry', telemetry => applyTelemetry(telemetry));
+connection.onreconnecting(() => snapshotOrder.reconnect());
 connection.onreconnected(refreshSnapshots);
 connection.onclose(scheduleSignalRStart);
 
@@ -349,7 +376,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     connectionWatchdogTimer = window.setInterval(updateConnectionOverlay, 1000);
     await refreshSnapshots();
     await startSignalR();
-    refreshTimer = window.setInterval(refreshSnapshots, 5000);
+    refreshTimer = window.setInterval(() => { if (snapshotOrder.needsRefresh()) void refreshSnapshots(); }, 5000);
 });
 
 window.addEventListener('beforeunload', () => {
@@ -360,23 +387,21 @@ window.addEventListener('beforeunload', () => {
     if (relayAlertTimer) window.clearTimeout(relayAlertTimer);
 });
 
-async function fetchJson(url) {
-    const response = await fetch(url);
+async function fetchJson(url, options) {
+    const response = await fetch(url, options);
     if (!response.ok) throw new Error(response.statusText);
     return response.json();
 }
 
-async function refreshSnapshots() {
-    try {
-        const [state, telemetry] = await Promise.all([
-            fetchJson('/api/game/state'),
-            fetchJson('/api/game/telemetry'),
-        ]);
-        applyState(state);
-        applyTelemetry(telemetry);
-    } catch (error) {
-        console.debug('TV snapshot refresh failed:', error);
-    }
+function refreshSnapshots() { return snapshotOrder.refresh(loadSnapshots); }
+
+async function loadSnapshots(generation, signal) {
+    const [state, telemetry] = await Promise.allSettled([
+        fetchJson('/api/game/state', { signal }),
+        fetchJson('/api/game/telemetry', { signal }),
+    ]);
+    if (state.status === 'fulfilled') applyState(state.value, generation);
+    if (telemetry.status === 'fulfilled') applyTelemetry(telemetry.value, generation);
 }
 
 async function startSignalR() {
@@ -418,7 +443,7 @@ function stopTimer() {
 }
 
 function tickTimer() {
-    const elapsed = (Date.now() - phaseStartMs) / 1000;
+    const elapsed = (performance.now() - phaseStartMs) / 1000;
     const remaining = Math.max(0, phaseTotalSecs - elapsed);
 
     if (currentPhase === 'countdown') {
@@ -441,24 +466,31 @@ function tickTimer() {
         const clock = document.getElementById('playing-clock');
         clock.textContent = `${minutes}:${String(seconds).padStart(2, '0')}`;
         clock.className = remaining <= 60 ? 'urgent' : '';
+        updateModeCycle(latestSnapshot, elapsed);
     }
 }
 
-function serverOffset(startedAtMs, serverNowMs, totalSeconds) {
+function serverOffset(startedAtMs, serverNowMs, totalSeconds, remainingMs) {
+    if (Number.isFinite(remainingMs)) return totalSeconds * 1000 - Math.max(0, remainingMs);
     if (!startedAtMs || !serverNowMs) return 0;
     const elapsedMs = serverNowMs - startedAtMs;
     return Math.min(Math.max(0, elapsedMs), totalSeconds * 1000);
 }
 
-function applyState(snapshot) {
+function applyState(snapshot, generation) {
+    if (!snapshotOrder.accept('state', snapshot, generation)) return;
     if (!snapshot || typeof snapshot !== 'object') return;
     markStateUpdate();
+    latestSnapshot = snapshot;
 
     const state = String(snapshot.hostingState || 'Idle').toLowerCase();
     const players = snapshot.players || [];
     const status = document.getElementById('header-status');
     status.textContent = snapshot.state || 'IDLE';
     status.className = '';
+    document.getElementById('header-title').textContent = state === 'idle' || !snapshot.gameTypeLabel
+        ? '⚡ LAZER TAG'
+        : `⚡ ${snapshot.gameTypeLabel}`;
 
     if (state === 'idle') {
         stopTimer();
@@ -476,7 +508,7 @@ function applyState(snapshot) {
     if (state === 'countdown' || state === 'resendcountdown') {
         status.classList.add('countdown');
         phaseTotalSecs = snapshot.countdownSeconds || 30;
-        phaseStartMs = Date.now() - serverOffset(snapshot.countdownStartedAtMs, snapshot.serverTimeMs, phaseTotalSecs);
+        phaseStartMs = performance.now() - serverOffset(snapshot.countdownStartedAtMs, snapshot.serverTimeMs, phaseTotalSecs, snapshot.phaseRemainingMs);
         document.getElementById('countdown-label').textContent = 'GET READY';
         showPhase('countdown');
         tickTimer();
@@ -487,9 +519,10 @@ function applyState(snapshot) {
     if (state === 'playing') {
         status.classList.add('playing');
         phaseTotalSecs = (snapshot.gameMinutes || 10) * 60;
-        const offset = serverOffset(snapshot.gameStartedAtMs, snapshot.serverTimeMs, phaseTotalSecs);
-        phaseStartMs = Date.now() - offset;
+        const offset = serverOffset(snapshot.gameStartedAtMs, snapshot.serverTimeMs, phaseTotalSecs, snapshot.phaseRemainingMs);
+        phaseStartMs = performance.now() - offset;
 
+        renderPlayingMode(snapshot);
         if (currentPhase !== 'playing') {
             showPhase('playing');
             buildPlayingPlayers(players);
@@ -523,7 +556,8 @@ function applyState(snapshot) {
     showPhase('idle');
 }
 
-function applyTelemetry(telemetry) {
+function applyTelemetry(telemetry, generation) {
+    if (!snapshotOrder.accept('telemetry', telemetry, generation)) return;
     if (typeof telemetry?.relayConnected !== 'boolean') return;
 
     const online = telemetry.relayConnected;
@@ -572,6 +606,55 @@ function renderLobby(snapshot, players) {
       </article>`).join('');
 }
 
+function renderPlayingMode(snapshot) {
+    document.getElementById('playing-mode-name').textContent = snapshot?.gameTypeLabel || 'LAZER TAG';
+    document.getElementById('playing-objective').textContent = snapshot?.gameObjective
+        || 'Game data is stored on the taggers and reported after play.';
+    updateModeCycle(snapshot, Math.max(0, (performance.now() - phaseStartMs) / 1000));
+}
+
+function updateModeCycle(snapshot, elapsedSeconds) {
+    const cycleElement = document.getElementById('playing-cycle');
+    if (!cycleElement) return;
+
+    const cycleSeconds = Math.max(0, Number(snapshot?.roleCycleSeconds) || 0);
+    const code = String(snapshot?.gameTypeCode || '').toUpperCase();
+    if (!cycleSeconds) {
+        const staticStatus = code.startsWith('OWN') || code.endsWith('TOZ')
+            ? 'ZONE ACTIVE'
+            : code === 'RESP' || code.endsWith('TRS')
+                ? 'RESPAWN ZONE ACTIVE'
+                : code.endsWith('KNG')
+                    ? 'KING IDENTITIES HIDDEN'
+                    : '';
+        cycleElement.textContent = staticStatus;
+        cycleElement.classList.toggle('active', Boolean(staticStatus));
+        return;
+    }
+
+    const cycleIndex = Math.floor(elapsedSeconds / cycleSeconds);
+    const withinCycle = elapsedSeconds % cycleSeconds;
+    const switchIn = Math.max(0, Math.ceil(cycleSeconds - withinCycle));
+
+    if (code === 'HDSK') {
+        const firstSeeker = snapshot?.reverseHuntDirection ? 2 : 1;
+        const seeker = cycleIndex % 2 === 0 ? firstSeeker : (firstSeeker === 1 ? 2 : 1);
+        const hider = seeker === 1 ? 2 : 1;
+        cycleElement.textContent = `TEAM ${seeker} SEEKING • TEAM ${hider} HIDING • SWITCH IN ${formatShortTime(switchIn)}`;
+    } else if (code === 'HUNT') {
+        const direction = cycleIndex % 2 === 0 ? 'A' : 'B';
+        cycleElement.textContent = `HUNT DIRECTION ${direction} • SWITCH IN ${formatShortTime(switchIn)}`;
+    } else {
+        cycleElement.textContent = `ROLE SWITCH IN ${formatShortTime(switchIn)}`;
+    }
+    cycleElement.classList.add('active');
+}
+
+function formatShortTime(totalSeconds) {
+    const seconds = Math.max(0, Math.trunc(totalSeconds));
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
 function buildPlayingPlayers(players) {
     const list = document.getElementById('playing-players');
     list.innerHTML = '';
@@ -580,9 +663,11 @@ function buildPlayingPlayers(players) {
     players.forEach(player => {
         const card = document.createElement('article');
         card.className = 'playing-card';
+        const team = Number(player.team);
+        const detail = Number.isInteger(team) && team > 0 ? `${teamName(team)} · IN GAME` : 'IN GAME';
         card.innerHTML = `
           <div class="playing-card-name">${esc(player.name || player.id)}</div>
-          <div class="playing-card-score">Hits: <span class="hit-count">${hits(player.hitsScored)}</span></div>`;
+          <div class="playing-card-score"><span class="live-status">${esc(detail)}</span></div>`;
         playingCards.set(String(player.id), card);
         list.appendChild(card);
     });
@@ -600,19 +685,26 @@ function updatePlayingScores(players) {
 
     players.forEach(player => {
         const card = playingCards.get(String(player.id));
-        const count = card?.querySelector('.hit-count');
-        if (count) count.textContent = String(hits(player.hitsScored));
+        const status = card?.querySelector('.live-status');
+        const team = Number(player.team);
+        if (status) status.textContent = Number.isInteger(team) && team > 0 ? `${teamName(team)} · IN GAME` : 'IN GAME';
     });
 }
 
 function renderDebrief(players) {
     const reported = players.filter(player => player.allDebriefed).length;
-    document.getElementById('debrief-subtitle').textContent = `${reported} of ${players.length} guns have reported`;
-    document.getElementById('debrief-players').innerHTML = players.map(player => `
-      <article class="debrief-card ${player.allDebriefed ? 'done' : 'waiting'}">
+    const dropped = players.filter(player => player.dropped).length;
+    const active = players.length - dropped;
+    document.getElementById('debrief-subtitle').textContent = `${reported} of ${active} active guns have reported${dropped ? ` · ${dropped} dropped` : ''}`;
+    document.getElementById('debrief-players').innerHTML = players.map(player => {
+      const stateClass = player.dropped ? 'dropped' : (player.allDebriefed ? 'done' : 'waiting');
+      const status = player.dropped ? '— DROPPED' : (player.allDebriefed ? '✓ REPORTED' : '⏳ WAITING…');
+      return `
+      <article class="debrief-card ${stateClass}">
         <div class="debrief-card-name">${esc(player.name || player.id)}</div>
-        <div class="debrief-card-status">${player.allDebriefed ? '✓ REPORTED' : '⏳ WAITING…'}</div>
-      </article>`).join('');
+        <div class="debrief-card-status">${status}</div>
+      </article>`;
+    }).join('');
 }
 
 function renderScores(players, isTeamGame, authoritativeTeams, resultsFinalized) {
@@ -827,12 +919,12 @@ function score(raw) {
 }
 
 function markStateUpdate() {
-    lastStateUpdateMs = Date.now();
+    lastStateUpdateMs = performance.now();
     setConnectionOverlay(false);
 }
 
 function updateConnectionOverlay() {
-    const elapsedMs = Date.now() - lastStateUpdateMs;
+    const elapsedMs = performance.now() - lastStateUpdateMs;
     if (elapsedMs < stateStaleAfterMs) return;
 
     const elapsedSeconds = Math.max(1, Math.floor(elapsedMs / 1000));

@@ -1,5 +1,7 @@
 using LazerTagWebServer;
+using LazerTagHostLibrary;
 using LazerTagWebServer.Hubs;
+using LazerTagWebServer.Models;
 using LazerTagWebServer.Security;
 using LazerTagWebServer.Services;
 using System.Reflection;
@@ -29,6 +31,7 @@ builder.Services.AddSignalR(options =>
     options.EnableDetailedErrors = builder.Environment.IsDevelopment();
 });
 builder.Services.AddSingleton<HostGunService>();
+builder.Services.AddSingleton<GameHubConnections>();
 builder.Services.AddSingleton<GameHistoryStore>();
 builder.Services.AddSingleton<OperatorSessionService>();
 builder.Services.AddRateLimiter(options =>
@@ -65,9 +68,35 @@ builder.WebHost.ConfigureKestrel(options =>
     options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
 });
 
-PlayerSettings.ConfigureDataDirectory(builder.Configuration["Arena:DataDirectory"]);
-
 var app = builder.Build();
+PlayerSettings.ConfigureDataDirectory(app.Configuration["Arena:DataDirectory"]);
+
+// Each installed release is immutable. Read the catalog through the game engine
+// once, before a deployment can pass its first readiness probe.
+bool releaseReady = true;
+try
+{
+    foreach (var mode in GameModeCatalog.Options)
+    {
+        var info = GameTypes.GetInfo(mode.GameType);
+        if (info.Name.ToString() != mode.Code || info.TeamCount != mode.TeamCount)
+            throw new InvalidDataException($"GameTypes.xml has an incompatible definition for {mode.Code}.");
+    }
+    foreach (var path in new[] { "index.html", "tv.html", "css/app.css", "js/app.js", "js/snapshots.js", "js/signalr.min.js" })
+    {
+        var file = app.Environment.WebRootFileProvider.GetFileInfo(path);
+        if (!file.Exists || file.IsDirectory)
+            throw new InvalidDataException($"Missing or empty web asset: {path}.");
+        using var content = file.CreateReadStream();
+        if (content.ReadByte() < 0) throw new InvalidDataException($"Empty web asset: {path}.");
+    }
+}
+catch (Exception ex) when (ex is TypeInitializationException or KeyNotFoundException
+    or IOException or InvalidDataException or UnauthorizedAccessException)
+{
+    releaseReady = false;
+    app.Logger.LogError(ex, "Release readiness failed. Check GameTypes.xml and the packaged web assets.");
+}
 
 // Force production configuration validation during startup instead of on the first login.
 _ = app.Services.GetRequiredService<OperatorSessionService>();
@@ -116,17 +145,17 @@ app.UseStaticFiles(new StaticFileOptions
 
 app.MapControllers();
 app.MapHub<GameHub>("/gamehub");
-app.MapGet("/healthz", (HostGunService service) => Results.Ok(new
+app.MapGet("/healthz", (HostGunService service) => Results.Json(new
 {
-    Status = "ok",
+    Status = releaseReady ? "ok" : "unavailable",
     Version = typeof(Program).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
         ?? typeof(Program).Assembly.GetName().Version?.ToString(3)
         ?? "unknown",
     RelayConnected = service.IsRelayConnected,
     Hosting = service.IsHosting,
     Utc = DateTimeOffset.UtcNow,
-}));
-app.MapGet("/healthz/live", () => Results.Ok(new { Status = "ok" }));
+}, statusCode: releaseReady ? StatusCodes.Status200OK : StatusCodes.Status503ServiceUnavailable));
+app.MapGet("/healthz/live", (HostGunService host) => Results.Ok(new { Status = "ok", MatchUpdateLock = host.UsesApplianceUpdateLock }));
 
 app.Run();
 
