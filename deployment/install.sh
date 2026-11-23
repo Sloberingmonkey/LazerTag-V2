@@ -140,6 +140,7 @@ if ((INSTALL_PACKAGES == 1)); then
         hostapd \
         network-manager \
         nftables \
+        python3 \
         rfkill \
         tar \
         util-linux \
@@ -147,7 +148,7 @@ if ((INSTALL_PACKAGES == 1)); then
     systemctl enable --now NetworkManager.service
 fi
 
-for COMMAND in curl dnsmasq file flock hostapd hostapd_cli ip iw nmcli nft rfkill sha256sum systemctl tar wpa_passphrase; do
+for COMMAND in curl dnsmasq file flock hostapd hostapd_cli ip iw nmcli nft python3 rfkill sha256sum systemctl tar wpa_passphrase; do
     command -v "${COMMAND}" >/dev/null || die "required command not found: ${COMMAND}"
 done
 

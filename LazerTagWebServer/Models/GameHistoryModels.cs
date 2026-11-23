@@ -23,6 +23,12 @@ public sealed record CompletedGameRecord
 
     /// <summary>Forced or incomplete debriefs retain diagnostics but not authoritative scores.</summary>
     public bool ResultsFinalized => AllPlayersDebriefed && !Forced;
+
+    /// <summary>
+    /// The operator finished with missing reports and scores were calculated from the
+    /// reports that arrived. Records saved before this field existed read as false.
+    /// </summary>
+    public bool PartialResults { get; init; }
     public GameHistorySettings Settings { get; init; } = new();
     public IReadOnlyList<GameHistoryPlayer> Players { get; init; } = [];
     public IReadOnlyList<GameHistoryTeam> Teams { get; init; } = [];
@@ -89,5 +95,6 @@ public sealed record CompletedGameSummary
     public bool Forced { get; init; }
     public bool AllPlayersDebriefed { get; init; }
     public bool ResultsFinalized => AllPlayersDebriefed && !Forced;
+    public bool PartialResults { get; init; }
     public int PlayerCount { get; init; }
 }

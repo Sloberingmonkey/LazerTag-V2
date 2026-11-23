@@ -10,7 +10,7 @@ read-only 1280x720 TV scoreboard.
 ## Current status
 
 The hardware-verified Version 1 source is preserved separately from the
-operations-focused `2.0.0-rc.1` candidate. See
+operations/gameplay-focused `2.0.0-rc.3` candidate. See
 [`V2_RELEASE_CANDIDATE.md`](V2_RELEASE_CANDIDATE.md) for the exact scope,
 acceptance checklist, and rollback path before installing the candidate in a
 public arena.
@@ -71,9 +71,9 @@ Do not expose ports `5000` or `8266` to the public internet.
 
 - ASP.NET Core 8 web server with SignalR live updates.
 - PIN-protected operator console and read-only public TV display.
-- Solo, two-team, and three-team hosted-game support.
+- LTAR-native Battle, Hide & Seek, Hunt the Prey, Kings, Own the Zone, Respawn, and Survival modes across their supported solo/team variants.
 - Guided tagger joining and confirmed player assignment.
-- Live countdown, game-state, roster, score, and debrief updates.
+- Live countdown, game-state, roster, objective/role-cycle, and debrief updates; authoritative scores are shown after tagger debrief rather than guessed during play.
 - Operator readiness checks that block countdown until the relay, roster,
   assignments, and team coverage are ready.
 - Persistent completed-game history with operator-only detail, JSON, and CSV
@@ -115,14 +115,25 @@ Do not expose ports `5000` or `8266` to the public internet.
 9. At game end, leave the system in Summary until every player is debriefed.
 10. Use `tv.html` as the customer-facing results display.
 
-Do not clear an incomplete debrief unless the missing tagger cannot be recovered
-and the operator deliberately accepts incomplete results.
+**End Game** starts debriefing during play. Pressing it again leaves reporting
+open. Under **Active Players**, you can see which taggers still owe reports.
+If a tagger cannot be recovered, select **Finish with missing reports** and
+confirm to save the incomplete game. A complete debrief publishes final scores
+and ranks automatically.
+
+The saved roster updates when a lobby opens successfully. If the relay is
+offline, reconnect it and retry with your edited roster.
+
+**Recent Results** shows when a completed game is waiting for storage. Keep the
+Pi running while you restore disk space or access. The server retries
+automatically, even after you clear the match. It can hold 64 unsaved games in
+memory and resumes admitting matches once a slot is free.
 
 ## Local development and verification
 
 Requirements:
 
-- .NET 8 SDK
+- .NET 10 SDK
 - Node.js
 - PowerShell
 - OpenSSH client and `tar` for Pi deployment
@@ -138,6 +149,7 @@ dotnet test .\LazerTagWebServer.Tests\LazerTagWebServer.Tests.csproj `
   -c Release
 
 node --check .\LazerTagWebServer\wwwroot\js\app.js
+node --test .\LazerTagWebServer.Tests\operator-console.test.cjs
 
 dotnet publish .\LazerTagWebServer\LazerTagWebServer.csproj `
   -c Release `
@@ -160,7 +172,7 @@ Open `http://localhost:5000`.
 
 ## ESP32 relay
 
-The normal relay configuration is:
+The Pi sends game commands to the ESP32 over Wi-Fi using TCP port `8266`. The stock relay sketch sends diagnostic messages over USB serial.
 
 | Setting | Value |
 |---|---|
@@ -222,7 +234,21 @@ an SSH session carried over Wi-Fi.
 
 ### Routine server update
 
-After the one-time appliance installation:
+On a Windows x64 PC, open **LazerTagUpdater.exe** on the Pi's management LAN.
+Select **lazertag-linux-arm64.tar.gz**, enter the Pi SSH account password, and
+click **Install update** between games. The updater also accepts an SSH private
+key. The Pi verifies the upload, backs up the arena, and reports the result of
+its restart and health check. The production hotspot permits the operator
+console on port 5000 and reserves SSH administration for the management network.
+The [Pi update guide](deployment/PI_SETUP.md#9-updates-and-automatic-rollback)
+covers the first connection, release files, and recovery.
+
+To build the standalone Windows app locally, run
+`dotnet publish LazerTagUpdater/LazerTagUpdater.csproj -c Release -r win-x64 -o artifacts/updater`.
+CI publishes the app as `lazertag-windows-updater` and the server archive in
+`lazertag-linux-arm64`.
+
+To build and deploy directly from the source in Visual Studio Code:
 
 1. Open the `LazerTagWebServer` folder in Visual Studio Code.
 2. Select **Terminal > Run Task**.

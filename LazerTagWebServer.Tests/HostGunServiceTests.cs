@@ -1,6 +1,8 @@
 using System.Reflection;
 using LazerTagHostLibrary;
+using LazerTagWebServer.Hubs;
 using LazerTagWebServer.Models;
+using LazerTagWebServer.Security;
 using LazerTagWebServer.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -10,6 +12,43 @@ namespace LazerTagWebServer.Tests;
 
 public sealed class HostGunServiceTests
 {
+    [Fact]
+    public async Task A_full_history_backlog_preserves_every_game_and_drains_after_storage_recovers()
+    {
+        var directory = CreateTemporaryDirectory();
+        var service = CreateService(directory);
+        try
+        {
+            string history = Path.Combine(directory, "game-history");
+            await File.WriteAllTextAsync(history, "temporarily unavailable");
+            var capture = typeof(HostGunService).GetMethod("TrackHistoryWrite", BindingFlags.Instance | BindingFlags.NonPublic)!;
+            var records = Enumerable.Range(0, 64)
+                .Select(_ => new CompletedGameRecord { GameId = Guid.NewGuid().ToString("N") }).ToArray();
+            foreach (var record in records)
+            {
+                capture.Invoke(service, [record]);
+                capture.Invoke(service, [record]);
+            }
+            Assert.Equal(records.Length, service.Telemetry.PendingHistoryWrites);
+            var admission = await service.StartHostingAsync(new StartGameRequest());
+            Assert.False(admission.Success);
+            Assert.Contains("waiting to save", admission.Error);
+            Assert.False(service.IsHosting);
+
+            File.Delete(history);
+            await service.DisposeAsync();
+            Assert.Equal(0, service.Telemetry.PendingHistoryWrites);
+            Assert.Equal(records.Length, service.Telemetry.HistoryWritesCompleted);
+            Assert.Equal(records.Select(record => record.GameId).Order(),
+                Directory.GetFiles(history, "*.json").Select(Path.GetFileNameWithoutExtension).Order());
+        }
+        finally
+        {
+            await service.DisposeAsync();
+            TryDeleteDirectory(directory);
+        }
+    }
+
     [Fact]
     public async Task Countdown_requires_connected_relay_and_every_declared_team()
     {
@@ -83,17 +122,46 @@ public sealed class HostGunServiceTests
     }
 
     [Fact]
+    public async Task Dropped_player_is_not_reported_as_successfully_debriefed()
+    {
+        string dataDirectory = CreateTemporaryDirectory();
+        var service = CreateService(dataDirectory);
+        try
+        {
+            var host = CreateJoinedHost(GameType.CustomLazerTagTwoTeams, [1, 2]);
+            AttachHost(service, host, plannedPlayerCount: 2);
+
+            var dropped = host.Players.First();
+            dropped.Dropped = true;
+            dropped.TagSummaryReceived = true;
+
+            GameStateSnapshot snapshot = service.GetGameState();
+            var player = snapshot.Players.Single(p => p.TaggerId == (byte)dropped.TaggerId);
+
+            Assert.True(player.Dropped);
+            Assert.False(player.AllDebriefed);
+        }
+        finally
+        {
+            await service.DisposeAsync();
+            TryDeleteDirectory(dataDirectory);
+        }
+    }
+
+    [Fact]
     public void Forced_solo_history_keeps_diagnostics_without_claiming_final_scores_or_teams()
     {
         var preferences = Enumerable.Repeat<int?>(null, 10).ToArray();
         var host = CreateJoinedHost(GameType.CustomLazerTag, preferences);
         try
         {
-            // This is the important edge case: every report may arrive immediately before the
-            // operator forces Summary to finish, but that forced library path still skips score
-            // calculation and therefore must never advertise authoritative results.
-            foreach (var player in host.Players)
-                player.TagSummaryReceived = true;
+            host.SetGameStartCountdownTime(0);
+            Assert.True(host.StartCountdown());
+            host.Update();
+            host.EndGame();
+            foreach (var player in host.Players.Skip(1)) player.TagSummaryReceived = true;
+            Assert.True(host.FinishDebrief());
+            Assert.Equal(HostGun.HostingStates.GameOver, host.HostingState);
 
             Type sessionType = typeof(HostGunService).GetNestedType(
                 "ActiveGameHistory", BindingFlags.NonPublic)
@@ -103,7 +171,6 @@ public sealed class HostGunServiceTests
             sessionType.GetProperty("GameTypeLabel")!.SetValue(session, "Solo Test");
             sessionType.GetProperty("HostedAtUtc")!.SetValue(session, DateTimeOffset.UtcNow.AddMinutes(-10));
             sessionType.GetProperty("EndedAtUtc")!.SetValue(session, DateTimeOffset.UtcNow);
-            sessionType.GetProperty("Forced")!.SetValue(session, true);
 
             MethodInfo projector = typeof(HostGunService).GetMethod(
                 "CreateCompletedGameRecord", BindingFlags.Static | BindingFlags.NonPublic)
@@ -111,9 +178,10 @@ public sealed class HostGunServiceTests
             var record = (CompletedGameRecord)(projector.Invoke(null, [host, session])
                 ?? throw new InvalidOperationException("History projector returned no record."));
 
-            Assert.True(record.AllPlayersDebriefed);
+            Assert.False(record.AllPlayersDebriefed);
             Assert.True(record.Forced);
             Assert.False(record.ResultsFinalized);
+            Assert.True(record.PartialResults);
             Assert.Empty(record.Teams);
             Assert.Equal(Enumerable.Range(1, 10), record.Players.Select(player => player.Slot));
             Assert.All(record.Players, player => Assert.Equal(0, player.Team));
@@ -124,18 +192,36 @@ public sealed class HostGunServiceTests
         }
     }
 
-    private static HostGunService CreateService(string dataDirectory)
+    [Fact]
+    public void Pi_host_requires_a_network_relay_address()
+    {
+        string directory = CreateTemporaryDirectory();
+        try
+        {
+            var error = Assert.Throws<InvalidOperationException>(() => CreateService(directory, "/dev/ttyUSB0"));
+            Assert.Contains("host:port", error.Message);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    private static HostGunService CreateService(string dataDirectory, string relayAddress = "127.0.0.1:9")
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Arena:RelayAddress"] = "127.0.0.1:9",
+                ["Arena:RelayAddress"] = relayAddress,
                 ["Arena:DisableRelayReconnect"] = "true",
                 ["Arena:DataDirectory"] = dataDirectory,
             })
             .Build();
         var history = new GameHistoryStore(configuration, NullLogger<GameHistoryStore>.Instance);
-        return new HostGunService(null!, NullLogger<HostGunService>.Instance, history, configuration);
+        var sessions = new OperatorSessionService(configuration,
+            new Microsoft.Extensions.Hosting.Internal.HostingEnvironment { EnvironmentName = "Development" },
+            NullLogger<OperatorSessionService>.Instance);
+        return new HostGunService(null!, NullLogger<HostGunService>.Instance, history, configuration, new GameHubConnections(sessions));
     }
 
     private static HostGun CreateJoinedHost(GameType gameType, int?[] teamPreferences)

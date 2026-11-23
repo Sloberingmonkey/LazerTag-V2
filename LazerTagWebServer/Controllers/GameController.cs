@@ -11,23 +11,9 @@ namespace LazerTagWebServer.Controllers;
 [Route("api/[controller]")]
 public sealed class GameController : ControllerBase
 {
-    private sealed record GameTypeOption(int Id, string Label, int TeamCount, bool IsDefault = false)
-    {
-        public int MaxPlayers => TeamCount <= 1 ? 24 : TeamCount * 8;
-    }
+    private static readonly IReadOnlyDictionary<int, GameModeOption> GameTypesById =
+        GameModeCatalog.Options.ToDictionary(option => option.Id);
 
-    private static readonly GameTypeOption[] GameTypeOptions =
-    [
-        new((int)GameType.CustomLazerTag,           "Custom Lazer Tag (Solo)",    1),
-        new((int)GameType.CustomLazerTagTwoTeams,   "Custom Lazer Tag (2 Teams)", 2, IsDefault: true),
-        new((int)GameType.CustomLazerTagThreeTeams, "Custom Lazer Tag (3 Teams)", 3),
-        new((int)GameType.RespawnTwoTeams,          "Respawn (2 Teams)",          2),
-        new((int)GameType.RespawnThreeTeams,        "Respawn (3 Teams)",          3),
-        new((int)GameType.SurvivalTwoTeams,         "Survival (2 Teams)",         2),
-    ];
-
-    private static readonly IReadOnlyDictionary<int, GameTypeOption> GameTypesById =
-        GameTypeOptions.ToDictionary(option => option.Id);
 
     private readonly HostGunService _service;
     public GameController(HostGunService service) => _service = service;
@@ -39,7 +25,7 @@ public sealed class GameController : ControllerBase
     public IActionResult GetTelemetry() => Ok(_service.Telemetry);
 
     [HttpGet("gametypes")]
-    public IActionResult GetGameTypes() => Ok(GameTypeOptions);
+    public IActionResult GetGameTypes() => Ok(GameModeCatalog.Options);
 
     [HttpGet("gametypedefaults/{id:int}")]
     public IActionResult GetGameTypeDefaults(int id)
@@ -58,7 +44,11 @@ public sealed class GameController : ControllerBase
                 DefaultReloads  = info.DefaultReloads == 0xff ? 0 : info.DefaultReloads,
                 DefaultMega     = info.DefaultMega    == 0xff ? 0 : info.DefaultMega,
                 DefaultSlowTags = info.DefaultSlowTags,
+                DefaultTeamTags = info.DefaultTeamTags,
                 TeamCount       = option.TeamCount,
+                MinMinutes      = option.MinMinutes,
+                MaxMinutes      = option.MaxMinutes,
+                MinuteStep      = option.MinuteStep,
             });
         }
         catch (Exception)
@@ -114,14 +104,26 @@ public sealed class GameController : ControllerBase
     }
 
     [HttpPost("endgame")]
+    [HttpPost("{gameId:guid}/endgame")]
     [OperatorAuthorize]
     [EnableRateLimiting("operator-control")]
-    public async Task<IActionResult> EndGame()
+    public async Task<IActionResult> EndGame([FromRoute] Guid? gameId = null)
     {
-        bool ended = await _service.EndGameAsync();
+        bool ended = await _service.EndGameAsync(gameId);
         return ended
             ? Ok(new { Success = true })
-            : Conflict(new { Error = "There is no active game to end." });
+            : Conflict(new { Error = "This game is no longer active." });
+    }
+
+    [HttpPost("{gameId:guid}/finish-debrief")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
+    public async Task<IActionResult> FinishDebrief(Guid gameId)
+    {
+        bool finished = await _service.FinishDebriefAsync(gameId);
+        return finished
+            ? Ok(new { Success = true })
+            : Conflict(new { Error = "This game is no longer waiting for reports." });
     }
 
     [HttpPost("next")]
@@ -132,7 +134,7 @@ public sealed class GameController : ControllerBase
         bool cleared = await _service.NextAsync();
         return cleared
             ? Ok(new { Success = true })
-            : Conflict(new { Error = "The game cannot be cleared until debriefing reaches Game Over. Use End Game again only if you must force missing reports." });
+            : Conflict(new { Error = "Wait for Game Over before clearing this game." });
     }
 
     [HttpPost("cleanup")]
@@ -154,15 +156,20 @@ public sealed class GameController : ControllerBase
             return Fail("Select a supported game type.", out error);
 
         req.GameTypeLabel = gameType.Label; // Never trust a client-supplied label in logs.
+        // LTAR does not implement hosted Medic Mode. Keep the wire state and saved history truthful
+        // even if an older preset or API client sends the field as true.
+        req.MedicMode = false;
 
-        if (!InRange(req.Minutes, 1, 255))
-            return Fail("Minutes must be between 1 and 255.", out error);
-        if (!InRange(req.CountdownSeconds, 5, 255))
-            return Fail("Countdown must be between 5 and 255 seconds.", out error);
-        if (!InRange(req.GlobalHp, 1, 254))
-            return Fail("Global HP must be between 1 and 254.", out error);
-        if (!InRange(req.GlobalShields, 0, 254))
-            return Fail("Global shields must be between 0 and 254.", out error);
+        if (!InRange(req.Minutes, gameType.MinMinutes, gameType.MaxMinutes))
+            return Fail($"Minutes for {gameType.Label} must be between {gameType.MinMinutes} and {gameType.MaxMinutes}.", out error);
+        if ((req.Minutes - gameType.MinMinutes) % gameType.MinuteStep != 0)
+            return Fail($"Minutes for {gameType.Label} must use {gameType.MinuteStep}-minute steps.", out error);
+        if (!InRange(req.CountdownSeconds, 5, gameType.MaxCountdownSeconds))
+            return Fail($"Countdown for {gameType.Label} must be between 5 and {gameType.MaxCountdownSeconds} seconds.", out error);
+        if (!InRange(req.GlobalHp, 1, gameType.MaxHpAndShields))
+            return Fail($"Global HP for {gameType.Label} must be between 1 and {gameType.MaxHpAndShields}.", out error);
+        if (!InRange(req.GlobalShields, 0, gameType.MaxHpAndShields))
+            return Fail($"Global shields for {gameType.Label} must be between 0 and {gameType.MaxHpAndShields}.", out error);
         if (req.GlobalReloads is < 0 or > 99)
             return Fail("Global reloads must be between 0 and 99; use 0 for unlimited.", out error);
         if (!InRange(req.GlobalMega, 0, 99))
@@ -172,8 +179,8 @@ public sealed class GameController : ControllerBase
         if (!InRange(req.GlobalSleepTimeout, 0, 99))
             return Fail("Global sleep timeout must be between 0 and 99 minutes.", out error);
 
-        if (req.Players is null || req.Players.Count < 2 || req.Players.Count > gameType.MaxPlayers)
-            return Fail($"Player count for {gameType.Label} must be between 2 and {gameType.MaxPlayers}.", out error);
+        if (req.Players is null || req.Players.Count < gameType.MinPlayers || req.Players.Count > gameType.MaxPlayers)
+            return Fail($"Player count for {gameType.Label} must be between {gameType.MinPlayers} and {gameType.MaxPlayers}.", out error);
 
         var usedSlots = new HashSet<int>();
         foreach (var player in req.Players)
@@ -205,10 +212,10 @@ public sealed class GameController : ControllerBase
                     : "Auto";
             }
 
-            if (player.Hp.HasValue && !InRange(player.Hp.Value, 1, 254))
-                return Fail($"Player {player.Slot}'s HP must be blank or 1-254.", out error);
-            if (player.Shields.HasValue && !InRange(player.Shields.Value, 0, 254))
-                return Fail($"Player {player.Slot}'s shields must be blank or 0-254.", out error);
+            if (player.Hp.HasValue && !InRange(player.Hp.Value, 1, gameType.MaxHpAndShields))
+                return Fail($"Player {player.Slot}'s HP must be blank or 1-{gameType.MaxHpAndShields}.", out error);
+            if (player.Shields.HasValue && !InRange(player.Shields.Value, 0, gameType.MaxHpAndShields))
+                return Fail($"Player {player.Slot}'s shields must be blank or 0-{gameType.MaxHpAndShields}.", out error);
             if (player.Reloads is < 0 or > 99)
                 return Fail($"Player {player.Slot}'s reloads must be blank or 0-99.", out error);
             if (player.Ammo.HasValue && !InRange(player.Ammo.Value, 0, 254))
@@ -264,6 +271,25 @@ public sealed class GameController : ControllerBase
                     .First();
                 autoPlayers[autoIndex++].TeamPreference = team;
                 teamCounts[team]++;
+            }
+        }
+
+        if (gameType.RequiresStandardHosting)
+        {
+            // Kings relies on the original game announcement so LTARs retain the hidden-King
+            // IFF behavior. Enhanced-only options are intentionally cleared for this mode.
+            req.AutoReload = false;
+            req.FullAuto = false;
+            req.DisableIff = false;
+            req.DisableHitRegister = false;
+            req.GlobalStartingAmmo = 0;
+            req.GlobalSleepTimeout = 0;
+            foreach (var player in req.Players)
+            {
+                player.AutoReload = null;
+                player.FullAuto = null;
+                player.Ammo = null;
+                player.SleepTimeout = null;
             }
         }
 

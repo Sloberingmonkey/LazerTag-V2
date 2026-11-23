@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using LazerTagWebServer.Security;
 using LazerTagWebServer.Services;
 using Microsoft.AspNetCore.SignalR;
@@ -11,32 +10,24 @@ namespace LazerTagWebServer.Hubs;
 /// </summary>
 public class GameHub : Hub
 {
-    public const string OperatorsGroup = "operators";
-    private static readonly ConcurrentDictionary<string, byte> ActiveConnections = new();
     private readonly HostGunService _service;
-    private readonly OperatorSessionService _operatorSessions;
+    private readonly GameHubConnections _connections;
 
-    public static bool HasClients => !ActiveConnections.IsEmpty;
-
-    public GameHub(HostGunService service, OperatorSessionService operatorSessions)
+    public GameHub(HostGunService service, GameHubConnections connections)
     {
         _service = service;
-        _operatorSessions = operatorSessions;
+        _connections = connections;
     }
 
     public override async Task OnConnectedAsync()
     {
-        ActiveConnections.TryAdd(Context.ConnectionId, 0);
-
         try
         {
             await base.OnConnectedAsync();
-
-            // State and telemetry drive the public TV. Detailed operational logs are only
-            // delivered to a control console that supplied a valid operator session token.
-            var accessToken = Context.GetHttpContext()?.Request.Query["access_token"].ToString();
-            if (_operatorSessions.IsValid(accessToken))
-                await Groups.AddToGroupAsync(Context.ConnectionId, OperatorsGroup);
+            var request = Context.GetHttpContext()?.Request;
+            var token = request == null ? null
+                : OperatorAuthorizeAttribute.ReadBearerToken(request) ?? request.Query["access_token"].ToString();
+            _connections.Connect(Context.ConnectionId, token);
 
             // Send current state immediately so the TV/phone shows the right screen on connect.
             await Task.WhenAll(
@@ -46,14 +37,14 @@ public class GameHub : Hub
         catch
         {
             // Removal is idempotent; OnDisconnectedAsync may also run after a failed connect.
-            ActiveConnections.TryRemove(Context.ConnectionId, out _);
+            _connections.Disconnect(Context.ConnectionId);
             throw;
         }
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
-        ActiveConnections.TryRemove(Context.ConnectionId, out _);
+        _connections.Disconnect(Context.ConnectionId);
         return base.OnDisconnectedAsync(exception);
     }
 }

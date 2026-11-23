@@ -74,6 +74,7 @@ public sealed class GameHistoryStore
             File.Move(temporaryPath, destinationPath, overwrite: false);
             temporaryPath = null;
             PruneOldRecords();
+            _log.LogInformation("Archived completed game {GameId}", gameId);
             return true;
         }
         catch (Exception ex)
@@ -115,6 +116,7 @@ public sealed class GameHistoryStore
                     EndedEarly = record.EndedEarly,
                     Forced = record.Forced,
                     AllPlayersDebriefed = record.AllPlayersDebriefed,
+                    PartialResults = record.PartialResults,
                     PlayerCount = record.Players.Count,
                 });
 

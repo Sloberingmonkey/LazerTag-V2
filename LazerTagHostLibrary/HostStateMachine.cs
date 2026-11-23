@@ -41,13 +41,17 @@ namespace LazerTagHostLibrary.StateMachine
         private readonly Dictionary<HostSessionState, HostStatePolicy> _policies;
         private DateTime? _stateDeadlineUtc;
         private int _retryCount;
+        private readonly MatchClock _clock;
 
         public HostSessionState CurrentState { get; private set; }
 
         public event EventHandler<HostStateChangedEventArgs> StateChanged;
 
-        public HostStateMachine(Dictionary<HostSessionState, HostStatePolicy> policies = null)
+        public HostStateMachine(Dictionary<HostSessionState, HostStatePolicy> policies = null) : this(policies, MatchClock.Start()) { }
+
+        internal HostStateMachine(Dictionary<HostSessionState, HostStatePolicy> policies, MatchClock clock)
         {
+            _clock = clock;
             _policies = policies ?? HostStatePolicies.CreateDefault();
             CurrentState = HostSessionState.Idle;
             EnterState(HostSessionState.Idle, "initial");
@@ -131,7 +135,12 @@ namespace LazerTagHostLibrary.StateMachine
                 return false;
             }
 
-            return Handle(new HostStateMachineEvent(HostEventType.TimeoutExpired), out note);
+            if (!Handle(new HostStateMachineEvent(HostEventType.TimeoutExpired), out note))
+                return false;
+
+            // A retry may stay in the same state. Its deadline starts at this tick.
+            SetTimeoutDeadline(utcNow);
+            return true;
         }
 
         private bool HandleIdle(HostStateMachineEvent evt, out string note)
@@ -395,11 +404,13 @@ namespace LazerTagHostLibrary.StateMachine
         {
             CurrentState = state;
             _retryCount = 0;
+            SetTimeoutDeadline(_clock.Now);
+        }
 
-            var policy = PolicyFor(state);
-            _stateDeadlineUtc = policy.Timeout.HasValue
-                ? DateTime.UtcNow.Add(policy.Timeout.Value)
-                : (DateTime?)null;
+        private void SetTimeoutDeadline(DateTime utcNow)
+        {
+            var timeout = PolicyFor(CurrentState).Timeout;
+            _stateDeadlineUtc = timeout.HasValue ? utcNow.Add(timeout.Value) : (DateTime?)null;
         }
 
         private void TransitionTo(HostSessionState newState, string reason)

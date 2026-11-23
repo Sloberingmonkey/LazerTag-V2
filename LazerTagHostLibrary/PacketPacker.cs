@@ -44,11 +44,11 @@ namespace LazerTagHostLibrary
 			var packet = new Packet();
 			packet.Type = gameDefinition.GameTypeInfo.PacketType;
 			packet.Data.Add(new Signature(SignatureType.Data, gameDefinition.GameId));
-			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal((byte)gameDefinition.GameTimeMinutes)));
-			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal((byte)gameDefinition.Tags)));
-			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal((byte)gameDefinition.Reloads)));
-			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal((byte)gameDefinition.Shields)));
-			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal((byte)gameDefinition.Mega)));
+			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal(gameDefinition.GameTimeMinutes)));
+			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal(gameDefinition.Tags)));
+			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal(gameDefinition.Reloads)));
+			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal(gameDefinition.Shields)));
+			packet.Data.Add(new Signature(SignatureType.Data, BinaryCodedDecimal.FromDecimal(gameDefinition.Mega)));
 
 	        var flags1 = (byte) ((gameDefinition.ExtendedTagging ? 1 : 0) << 7 |
 								 (gameDefinition.LimitedReloads ? 1 : 0) << 6 |
@@ -136,6 +136,8 @@ namespace LazerTagHostLibrary
 
 		public static Packet Countdown(UInt16 gameId, byte remainingSeconds, int playerCountTeam1, int playerCountTeam2, int playerCountTeam3)
 		{
+			if (remainingSeconds > BinaryCodedDecimal.MaxDecimalValue)
+				throw new ArgumentOutOfRangeException(nameof(remainingSeconds), "A standard countdown supports up to 99 seconds.");
 			var packet = new Packet();
 			packet.Type = PacketType.AnnounceCountdown;
 			packet.Data.Add(new Signature(SignatureType.Data, gameId));
@@ -240,6 +242,20 @@ namespace LazerTagHostLibrary
 				((gameDefinition.GameTypeInfo.HospitalZones ? 1 : 0) << 3) |
 				((gameDefinition.GameTypeInfo.ZonesTagPlayers ? 1 : 0) << 2) |
 				(gameDefinition.TeamCount & 0x03));
+
+			// Respawn needs the same neutralize + supply-zone revive semantics in the
+			// enhanced LTAR game contents as it does in the standard hosted packet.
+			// Without these bits, an enhanced-hosted Respawn game can broadcast a zone
+			// but the taggers are not instructed to use it to return neutralized players.
+			switch (gameDefinition.GameType)
+			{
+				case GameType.Respawn:
+				case GameType.RespawnTwoTeams:
+				case GameType.RespawnThreeTeams:
+					flags1 |= 0x80; // neutralize instead of permanently ending the player's game
+					flags2 |= 0x30; // neutralize on tag + supply zones unneutralize
+					break;
+			}
 
 			var flags3 = (byte)(
 				((gameDefinition.UseStandardLtarBeacons ? 1 : 0) << 7) |

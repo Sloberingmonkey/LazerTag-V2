@@ -35,8 +35,8 @@
             aria-describedby="countdown-action-status">
       <span class="action-icon" aria-hidden="true">⏱</span><span>Countdown</span>
     </button>
-    <button type="button" id="btn-end" class="action-btn action-red" onclick="endGame()">
-      <span class="action-icon" aria-hidden="true">■</span><span id="end-action-label">End Game</span>
+    <button type="button" id="btn-end" class="action-btn action-red" onclick="endGame()" disabled>
+      <span class="action-icon" aria-hidden="true">■</span><span>End Game</span>
     </button>
     <button type="button" id="btn-next" class="action-btn action-muted" onclick="nextStep()">
       <span class="action-icon" aria-hidden="true">↻</span><span>New Game</span>
@@ -72,6 +72,13 @@
       </div>
       <label class="sr-only" for="game-type-select">Game type</label>
       <select id="game-type-select" class="full-select" onchange="onGameTypeChange()"></select>
+      <div id="game-mode-info" class="game-mode-info" aria-live="polite">
+        <div class="game-mode-info-head">
+          <span id="game-mode-code" class="mode-code">MODE</span>
+          <strong id="game-mode-objective">Choose a game mode.</strong>
+        </div>
+        <div id="game-mode-note" class="game-mode-note"></div>
+      </div>
     </section>
 
     <section class="card" data-setup-section>
@@ -221,6 +228,7 @@
         <div>
           <h2 id="history-title">Recent Results</h2>
           <p id="history-summary" class="section-subtitle">Unlock operator controls to view saved games.</p>
+          <p id="history-write-status" class="section-subtitle" role="status" hidden></p>
         </div>
         <button type="button" id="history-refresh" class="pill-btn" onclick="loadHistory()">Refresh</button>
       </div>
@@ -236,6 +244,7 @@
           <h2>Active Players</h2>
           <p id="live-summary" class="section-subtitle">No taggers connected.</p>
         </div>
+        <button type="button" id="btn-finish-debrief" class="pill-btn" onclick="finishDebrief()" hidden disabled>Finish with missing reports</button>
       </div>
       <div id="live-player-list" class="live-list">
         <div class="empty-state">
@@ -281,6 +290,7 @@
 
 <noscript><div class="noscript">JavaScript is required to operate the Lazer Tag server.</div></noscript>
 <script src="/js/signalr.min.js"></script>
+<script src="/js/snapshots.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>

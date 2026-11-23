@@ -10,6 +10,8 @@ namespace LazerTagHostLibrary
 	{
 		private readonly HostGun _hostGun;
 		public RandomId TaggerId { get; set; }
+		// The setup row stays with this tagger even when another reservation expires.
+		public int PlannedSlotIndex { get; internal set; } = -1;
 		public bool Confirmed = false;
 		public bool Dropped = false;
 		public bool TagSummaryReceived = false;
@@ -22,6 +24,8 @@ namespace LazerTagHostLibrary
 		public bool[] TeamTagReportsExpected = {false, false, false};
 		public bool[] TeamTagReportsReceived = {false, false, false};
 		public bool LtarDebriefReleased = false;
+        internal System.Threading.Tasks.Task<bool> DebriefReleaseReceipt;
+        internal DateTime NextDebriefReleaseAttempt;
 
 		/// <summary>
 		/// Per-player HP override. Null means use the global Tags value from GameDefinition.
@@ -67,6 +71,13 @@ namespace LazerTagHostLibrary
 			get { return _taggedByPlayerCounts; }
 			set { _taggedByPlayerCounts = value; }
 		}
+
+		/// <summary>
+		/// True for each tagger whose detailed count against this player arrived as a
+		/// non-canonical packed-decimal byte (for example 0x8A). Such counts are kept for
+		/// compatibility but trusted only up to the hits this player says it took.
+		/// </summary>
+		public bool[] TaggedByCountSuspect { get; } = new bool[TeamPlayerId.MaximumPlayerNumber];
 
 		public TimeSpan ZoneTime;
 

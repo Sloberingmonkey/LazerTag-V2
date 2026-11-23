@@ -38,6 +38,7 @@ namespace LazerTagServerApp
         // ── References ────────────────────────────────────────────────────────
         private readonly HostGun      _hostGun;
         private readonly List<string> _plannedNames;
+        private readonly List<int?> _plannedTeams;
         private readonly Timer        _clockTimer;
 
         // ── Lobby ─────────────────────────────────────────────────────────────
@@ -59,6 +60,7 @@ namespace LazerTagServerApp
         private Panel           _debriefPanel;
         private FlowLayoutPanel _debriefTilesPanel;
         private Label           _debriefStatusLabel;
+        private Button          _finishDebriefButton;
 
         // ── Scores ────────────────────────────────────────────────────────────
         private Panel    _scoresPanel;
@@ -68,8 +70,11 @@ namespace LazerTagServerApp
         private Button   _closeBtn;
 
         // ── Constructor ───────────────────────────────────────────────────────
-        public GameWindow(HostGun hostGun, List<string> plannedNames)
+        public GameWindow(HostGun hostGun, List<string> plannedNames) : this(hostGun, plannedNames, null) { }
+
+        public GameWindow(HostGun hostGun, List<string> plannedNames, List<int?> plannedTeams)
         {
+            _plannedTeams = plannedTeams ?? new List<int?>();
             _hostGun      = hostGun;
             _plannedNames = plannedNames ?? new List<string>();
 
@@ -266,7 +271,16 @@ namespace LazerTagServerApp
                 AutoScroll = true, BackColor = Color.Transparent,
             };
 
+            var actions = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 46, FlowDirection = FlowDirection.RightToLeft };
+            _finishDebriefButton = new Button
+            {
+                Text = "Finish with missing reports", AutoSize = true, Height = 36,
+                BackColor = BgCard, ForeColor = TextPrimary, FlatStyle = FlatStyle.Flat,
+            };
+            _finishDebriefButton.Click += (s, e) => ConfirmFinishDebrief(this, _hostGun);
+            actions.Controls.Add(_finishDebriefButton);
             _debriefPanel.Controls.Add(_debriefTilesPanel);
+            _debriefPanel.Controls.Add(actions);
             _debriefPanel.Controls.Add(_debriefStatusLabel);
             _debriefPanel.Controls.Add(sep);
             _debriefPanel.Controls.Add(header);
@@ -419,20 +433,23 @@ namespace LazerTagServerApp
         // ── Lobby refresh ─────────────────────────────────────────────────────
         private void RefreshLobby()
         {
-            var players       = _hostGun.Players.ToList();
+            var players = _hostGun.WithStateLock(() => _hostGun.Players.ToList());
+            var openSlots = Enumerable.Range(0, _plannedNames.Count)
+                .Except(players.Select(p => p.PlannedSlotIndex)).ToList();
             var expectedCount = _plannedNames.Count > 0 ? _plannedNames.Count : -1;
             var isTeam        = _hostGun.GameDefinition.IsTeamGame;
             var teamCount     = _hostGun.GameDefinition.TeamCount;
+            var waitingByTeam = openSlots.ToLookup(slot =>
+            {
+                int preference = _plannedTeams.ElementAtOrDefault(slot) ?? 0;
+                return isTeam && preference >= 1 && preference <= teamCount ? preference : 0;
+            });
 
             _playerTilesPanel.SuspendLayout();
             _playerTilesPanel.Controls.Clear();
 
             if (isTeam && teamCount > 1)
             {
-                // Group by team — show a coloured header label then tiles for each team
-                // Distribute expected slots evenly across teams
-                int slotsPerTeam = expectedCount > 0 ? (int)Math.Ceiling((double)expectedCount / teamCount) : 0;
-
                 for (int t = 1; t <= teamCount; t++)
                 {
                     var tc = TeamColor(t);
@@ -468,18 +485,8 @@ namespace LazerTagServerApp
                                              .OrderBy(p => p.TeamPlayerId.TeamPlayerNumber))
                         _playerTilesPanel.Controls.Add(MakePlayerTile(p, isTeam));
 
-                    // Empty slots for this team
-                    int connectedOnTeam = players.Count(p => p.TeamPlayerId.TeamNumber == t);
-                    int emptyForTeam    = slotsPerTeam - connectedOnTeam;
-                    // Distribute planned names to teams in order
-                    int nameBase = (t - 1) * slotsPerTeam;
-                    for (int i = 0; i < emptyForTeam; i++)
-                    {
-                        int nameIdx = nameBase + connectedOnTeam + i;
-                        string slotName = (nameIdx < _plannedNames.Count)
-                            ? _plannedNames[nameIdx] : "Player " + (nameIdx + 1);
-                        _playerTilesPanel.Controls.Add(MakeEmptyTile(slotName, t));
-                    }
+                    foreach (var slot in waitingByTeam[t])
+                        _playerTilesPanel.Controls.Add(MakeEmptyTile(_plannedNames[slot], t));
                 }
             }
             else
@@ -487,11 +494,9 @@ namespace LazerTagServerApp
                 // Solo / free-for-all — flat list as before
                 foreach (var p in players.OrderBy(p => p.TeamPlayerId.PlayerNumber))
                     _playerTilesPanel.Controls.Add(MakePlayerTile(p, isTeam));
-                if (expectedCount > 0)
-                    for (int i = players.Count; i < expectedCount; i++)
-                        _playerTilesPanel.Controls.Add(MakeEmptyTile(
-                            i < _plannedNames.Count ? _plannedNames[i] : "Player " + (i + 1)));
             }
+            foreach (var slot in waitingByTeam[0])
+                _playerTilesPanel.Controls.Add(MakeEmptyTile(_plannedNames[slot]));
 
             // Keep team headers full-width on resize
             _playerTilesPanel.Resize += (s, e) =>
@@ -506,11 +511,10 @@ namespace LazerTagServerApp
 
             if (expectedCount > 0)
             {
-                int rem = expectedCount - players.Count;
+                int rem = openSlots.Count;
                 if (rem > 0)
                 {
-                    string next = players.Count < _plannedNames.Count
-                        ? _plannedNames[players.Count] : "Player " + (players.Count + 1);
+                    string next = _plannedNames[openSlots[0]];
                     _nextPlayerLabel.Text      = next + "  —  connect now";
                     _nextPlayerLabel.ForeColor = AccentGold;
                     _waitingLabel.Text         = players.Count + " of " + expectedCount + " connected";
@@ -544,6 +548,7 @@ namespace LazerTagServerApp
             var isTeam  = _hostGun.GameDefinition.IsTeamGame;
             int done    = players.Count(p => p.AllTagReportsReceived());
             int total   = players.Count;
+            _finishDebriefButton.Enabled = done < total;
 
             _debriefTilesPanel.SuspendLayout();
             _debriefTilesPanel.Controls.Clear();
@@ -689,6 +694,19 @@ namespace LazerTagServerApp
                 _hostGun.EndGame();
         }
 
+        internal static void ConfirmFinishDebrief(IWin32Window owner, HostGun host)
+        {
+            if (host == null) return;
+            int missing = host.WithStateLock(() => host.HostingState == HostGun.HostingStates.Summary
+                ? host.Players.Count(p => !p.AllTagReportsReceived()) : 0);
+            if (missing == 0) return;
+            string message = (missing == 1 ? "1 tagger still owes reports." : missing + " taggers still owe reports.")
+                + " Finish this game with incomplete results?";
+            if (MessageBox.Show(owner, message, "Finish with missing reports", MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                host.FinishDebrief();
+        }
+
         // ── Dark-themed dialog (replaces jarring white MessageBox) ────────────
         private bool DarkDialog(string title, string message, string ok, string cancel)
         {
@@ -770,9 +788,10 @@ namespace LazerTagServerApp
             var isTeam    = _hostGun.GameDefinition.IsTeamGame;
             var teamCount = _hostGun.GameDefinition.TeamCount;
 
-            _scoresTitleLabel.Text = "GAME OVER";
+            bool finalized = _hostGun.AllPlayersDebriefed;
+            _scoresTitleLabel.Text = finalized ? "GAME OVER" : "INCOMPLETE DEBRIEF";
 
-            if (isTeam && teamCount > 1)
+            if (finalized && isTeam && teamCount > 1)
             {
                 var parts = new List<string>();
                 for (int t = 1; t <= teamCount; t++)
@@ -800,7 +819,7 @@ namespace LazerTagServerApp
                 var item = new ListViewItem(rankText);
                 item.SubItems.Add(player.DisplayName);
                 item.SubItems.Add(isTeam ? "Team " + player.TeamPlayerId.TeamNumber : "");
-                item.SubItems.Add(player.Score.ToString());
+                item.SubItems.Add(finalized ? player.Score.ToString() : "—");
                 item.SubItems.Add(hs.ToString());
                 item.SubItems.Add(player.TagsTaken.ToString());
                 item.SubItems.Add(player.Survived ? "Yes" : "No");
@@ -831,7 +850,7 @@ namespace LazerTagServerApp
             {
                 var players   = _hostGun.Players.ToList();
                 var isTeam    = _hostGun.GameDefinition.IsTeamGame;
-                var teamCount = _hostGun.GameDefinition.TeamCount;
+                bool finalized = _hostGun.AllPlayersDebriefed;
                 var sb        = new System.Text.StringBuilder();
 
                 // Header
@@ -846,10 +865,10 @@ namespace LazerTagServerApp
                         : "";
 
                     sb.AppendLine(string.Format("{0},{1},{2},{3},{4},{5},{6},{7}",
-                        player.Rank,
+                        finalized ? player.Rank.ToString() : "",
                         CsvEscape(player.DisplayName),
                         isTeam ? "Team " + player.TeamPlayerId.TeamNumber : "",
-                        player.Score,
+                        finalized ? player.Score.ToString() : "",
                         hs,
                         player.TagsTaken,
                         player.Survived ? "Yes" : "No",

@@ -64,6 +64,10 @@ public sealed class ArenaApiTests : IClassFixture<ArenaWebApplicationFactory>
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.GetAsync("/api/game/savedplayers")).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/game/countdown", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/game/endgame", null)).StatusCode);
+        var match = Guid.NewGuid().ToString("N");
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync($"/api/game/{match}/endgame", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync($"/api/game/{match}/finish-debrief", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync("/api/game/finish-debrief", null)).StatusCode);
         Assert.Equal(HttpStatusCode.Unauthorized, (await client.PostAsync("/api/game/cleanup", null)).StatusCode);
     }
 
@@ -130,11 +134,48 @@ public sealed class ArenaApiTests : IClassFixture<ArenaWebApplicationFactory>
         Assert.NotEqual(HttpStatusCode.BadRequest, accepted.StatusCode);
     }
 
-    private static object StartRequest(int gameType, int playerCount) => new
+
+    [Fact]
+    public async Task Game_mode_catalog_exposes_supported_ltar_modes_and_constraints()
+    {
+        using var client = _factory.CreateClient();
+        var response = await client.GetAsync("/api/game/gametypes");
+        response.EnsureSuccessStatusCode();
+
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var modes = document.RootElement.EnumerateArray().ToList();
+
+        Assert.Contains(modes, mode => mode.GetProperty("code").GetString() == "HDSK"
+            && mode.GetProperty("minuteStep").GetInt32() == 2
+            && mode.GetProperty("roleCycleSeconds").GetInt32() == 60);
+        Assert.Contains(modes, mode => mode.GetProperty("code").GetString() == "HUNT"
+            && mode.GetProperty("teamCount").GetInt32() == 3);
+        Assert.Contains(modes, mode => mode.GetProperty("code").GetString() == "2KNG"
+            && mode.GetProperty("requiresStandardHosting").GetBoolean());
+        Assert.Contains(modes, mode => mode.GetProperty("code").GetString() == "2TOZ");
+        Assert.Contains(modes, mode => mode.GetProperty("code").GetString() == "2TRS");
+        Assert.Contains(modes, mode => mode.GetProperty("code").GetString() == "3SRV");
+    }
+
+    [Fact]
+    public async Task Hide_and_seek_rejects_odd_game_lengths_before_relay_connection()
+    {
+        using var client = _factory.CreateClient();
+        string token = await LoginAsync(client);
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        var request = StartRequest(5, 4, minutes: 9);
+        var response = await client.PostAsJsonAsync("/api/game/start", request);
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains("2-minute steps", await response.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static object StartRequest(int gameType, int playerCount, int minutes = 10) => new
     {
         gameType,
         gameTypeLabel = "ignored client label",
-        minutes = 10,
+        minutes = minutes,
         countdownSeconds = 30,
         globalHp = 10,
         globalShields = 0,

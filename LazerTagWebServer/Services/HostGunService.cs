@@ -21,8 +21,8 @@ public sealed class HostGunService : IAsyncDisposable
         public DateTimeOffset? StartedAtUtc { get; set; }
         public DateTimeOffset? EndedAtUtc { get; set; }
         public bool EndedEarly { get; set; }
-        public bool Forced { get; set; }
-        public bool ArchiveQueued { get; set; }
+        public bool ArchiveCaptured { get; set; }
+        public FileStream? UpdateLease { get; set; }
         public GameHistorySettings Settings { get; init; } = new();
     }
 
@@ -32,13 +32,15 @@ public sealed class HostGunService : IAsyncDisposable
     private const int    ReconnectIntervalMs   = 5000;
     private const int    UpdateIntervalMs      = 100;
     private const int    ClientBroadcastIntervalMs = 1000;
+    private const int    IdleBroadcastIntervalMs = 3500;
     private const int    StartDelayMs          = 500;  // Wait after disconnect before new HostGun connects
-    private const int    HistorySaveAttempts   = 3;
+    private const int    MaxPendingHistoryWrites = 64;
     private static readonly TimeSpan HistoryShutdownWait = TimeSpan.FromSeconds(3);
 
     // ── Dependencies ──────────────────────────────────────────────────────────────
 
     private readonly IHubContext<GameHub>       _hub;
+    private readonly GameHubConnections         _connections;
     private readonly ILogger<HostGunService>    _log;
     private readonly GameHistoryStore           _history;
     private readonly string                     _relayAddress;
@@ -55,20 +57,19 @@ public sealed class HostGunService : IAsyncDisposable
     private int               _sessionGameCount;
     private int               _disposed;
     private ActiveGameHistory? _activeGameHistory;
-    private readonly HashSet<Task> _pendingHistoryWrites = [];
-    private readonly CancellationTokenSource _historyWriteCancellation = new();
+    private sealed class PendingHistoryWrite
+    {
+        public Task Write { get; set; } = Task.CompletedTask;
+        public bool Retrying { get; set; }
+        public FileStream? UpdateLease { get; set; }
+    }
 
-    // Planned player settings - indexed by join order
-    private List<string>  _plannedNames      = [];
-    private List<int?>    _plannedTeams      = [];
-    private List<int?>    _plannedHp         = [];
-    private List<int?>    _plannedShields    = [];
-    private List<int?>    _plannedReloads    = [];
-    private List<bool?>   _plannedAutoReload = [];
-    private List<bool?>   _plannedFullAuto   = [];
-    private List<int?>    _plannedAmmo       = [];
-    private List<int?>    _plannedSleep      = [];
-    private int           _lastNamedPlayerCount;
+    private readonly Dictionary<string, PendingHistoryWrite> _pendingHistoryWrites = [];
+    private readonly CancellationTokenSource _historyWriteCancellation = new();
+    private readonly TaskCompletionSource _historyDraining = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    // The host binds each tagger to an index in this ordered setup roster.
+    private List<string> _plannedNames = [];
 
     // Timestamps used by TV to keep timers in sync after reconnect
     private long _countdownStartedAtMs;
@@ -76,10 +77,22 @@ public sealed class HostGunService : IAsyncDisposable
 
     // ── Public state ──────────────────────────────────────────────────────────────
 
+    private readonly string _serverInstance = Guid.NewGuid().ToString("N");
+    private long _snapshotRevision;
     private TelemetrySnapshot _telemetry = new();
     public TelemetrySnapshot Telemetry
     {
-        get { lock (_lock) { return _telemetry; } }
+        get
+        {
+            lock (_lock)
+                return _telemetry with
+                {
+                    ServerInstance = _serverInstance,
+                    Revision = ++_snapshotRevision,
+                    PendingHistoryWrites = _pendingHistoryWrites.Count,
+                    RetryingHistoryWrites = _pendingHistoryWrites.Values.Count(write => write.Retrying),
+                };
+        }
     }
     public bool IsHosting
     {
@@ -87,6 +100,8 @@ public sealed class HostGunService : IAsyncDisposable
     }
     public bool IsRelayConnected => Telemetry.RelayConnected;
     public string RelayAddress => _relayAddress;
+    private readonly string? _updateLockFile;
+    public bool UsesApplianceUpdateLock => OperatingSystem.IsLinux() && _updateLockFile == UpdateAdmission.ApplianceLock;
 
     // ── Timers ────────────────────────────────────────────────────────────────────
 
@@ -99,9 +114,13 @@ public sealed class HostGunService : IAsyncDisposable
         IHubContext<GameHub> hub,
         ILogger<HostGunService> log,
         GameHistoryStore history,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        GameHubConnections connections)
     {
         _hub = hub;
+        _connections = connections;
+        _updateLockFile = OperatingSystem.IsLinux() && AppContext.BaseDirectory.StartsWith("/opt/lazertag/", StringComparison.Ordinal)
+            ? UpdateAdmission.ApplianceLock : configuration["Arena:UpdateLockFile"];
         _log = log;
         _history = history;
         _relayAddress = ValidateRelayAddress(configuration["Arena:RelayAddress"] ?? DefaultRelayAddress);
@@ -109,7 +128,7 @@ public sealed class HostGunService : IAsyncDisposable
         Log.MinimumSeverity = Log.Severity.Information;
         Log.EntryAdded     += OnLibraryLog;
 
-        _updateTimer = new Timer(OnUpdateTick, null, Timeout.Infinite, Timeout.Infinite);
+        _updateTimer = new Timer(OnUpdateTick, null, IdleBroadcastIntervalMs, IdleBroadcastIntervalMs);
         bool disableReconnect = configuration.GetValue<bool>("Arena:DisableRelayReconnect");
         _reconnectTimer = new Timer(
             OnReconnectTick,
@@ -137,8 +156,7 @@ public sealed class HostGunService : IAsyncDisposable
     private void OnReconnectTick(object? _) => _ = EnsureRelayConnectedCoreAsync(waitForTurn: false);
 
     /// <summary>
-    /// Ensures the standby relay connection exists. Lifecycle operations share one gate so an
-    /// automatic reconnect cannot race a game start or cleanup operation.
+    /// Reconnects the current game's transport, or opens a standby connection while idle.
     /// </summary>
     public Task<bool> EnsureRelayConnectedAsync() => EnsureRelayConnectedCoreAsync(waitForTurn: true);
 
@@ -162,7 +180,26 @@ public sealed class HostGunService : IAsyncDisposable
         try
         {
             if (Volatile.Read(ref _disposed) != 0) return false;
-            if (_hostGun != null) return Telemetry.RelayConnected;
+            if (_hostGun is { } activeHost)
+            {
+                var protocol = activeHost.Protocol;
+                if (protocol.IsConnected && IsRelayConnected) return true;
+
+                // A handshake can take several seconds. Let End Game and state transitions
+                // proceed while the transport retries, then check that it still owns the session.
+                _lifecycleGate.Release();
+                entered = false;
+                await protocol.EnsureConnectedAsync();
+                bool activeConnected;
+                lock (_lock)
+                {
+                    if (!ReferenceEquals(activeHost, _hostGun)) return false;
+                    activeConnected = protocol.IsConnected;
+                    _telemetry = _telemetry with { RelayConnected = activeConnected };
+                }
+                await PushTelemetryAsync();
+                return activeConnected;
+            }
 
             if (_preConnectSerial is { IsConnected: true })
             {
@@ -177,8 +214,8 @@ public sealed class HostGunService : IAsyncDisposable
             DisconnectPreConnect();
             _log.LogInformation("Auto-connect: attempting {Address}", _relayAddress);
 
-            var serial = new LazerTagSerial();
-            MutateTelemetry(t => t with { RelayConnectAttempts = t.RelayConnectAttempts + 1 });
+            var serial = new LazerTagSerial(RecordDiagnostic);
+            serial.IoError += PreConnectSerial_IoError;
 
             bool connected;
             try
@@ -191,13 +228,11 @@ public sealed class HostGunService : IAsyncDisposable
                 connected = false;
             }
 
+            connected = connected && serial.IsConnected;
             if (connected)
             {
-                serial.IoError += PreConnectSerial_IoError;
                 _preConnectSerial = serial;
 
-                // The library's "TCP relay connected" log entry owns the connection counter.
-                // Only set the current status here to avoid counting one connection twice.
                 MutateTelemetry(t => t with { RelayConnected = true });
                 _log.LogInformation("Auto-connect: relay connected");
                 await PushLogAsync($"Relay connected at {_relayAddress}.");
@@ -218,12 +253,12 @@ public sealed class HostGunService : IAsyncDisposable
         catch (Exception ex)
         {
             _log.LogError(ex, "Relay reconnect error");
-            MutateTelemetry(t => t with { RelayConnected = false });
+            if (entered) MutateTelemetry(t => t with { RelayConnected = false });
             return false;
         }
         finally
         {
-            _lifecycleGate.Release();
+            if (entered) _lifecycleGate.Release();
         }
     }
 
@@ -232,56 +267,35 @@ public sealed class HostGunService : IAsyncDisposable
     public async Task<(bool Success, string Error)> StartHostingAsync(StartGameRequest req)
     {
         await _lifecycleGate.WaitAsync();
+        HostGun? startingHost = null;
+        FileStream? updateLease = null;
         try
         {
             lock (_lock)
             {
                 if (_hostGun != null)
                     return (false, "A game is already running.");
+                // Reserve room for this match before admitting it, so no captured result is evicted.
+                if (_pendingHistoryWrites.Count >= MaxPendingHistoryWrites)
+                    return (false, $"{MaxPendingHistoryWrites} completed games are waiting to save. Restore history storage to start another game.");
             }
+
+            if (_updateLockFile != null && (updateLease = UpdateAdmission.TryAcquire(_updateLockFile)) == null)
+                return (false, "Arena maintenance is in progress or the update lock is unavailable. Try again when maintenance finishes.");
 
             var players = req.Players.OrderBy(p => p.Slot).ToList();
 
-            // Planned settings are indexed by join order, so keep them in stable slot order.
+            // Every setting uses the same ordered roster as the operator's join hint.
             var plannedNames      = players.Select(p => string.IsNullOrWhiteSpace(p.Name) ? $"Player {p.Slot}" : p.Name.Trim()).ToList();
             var plannedTeams      = players.Select(p => p.TeamPreference).ToList();
             var plannedHp         = players.Select(p => p.Hp).ToList();
             var plannedShields    = players.Select(p => p.Shields).ToList();
-            var plannedReloads    = players.Select(p => p.Reloads).ToList();
+            // 0 reloads means unlimited, matching the global setting, which maps 0 to 0xff.
+            var plannedReloads    = players.Select(p => p.Reloads == 0 ? 0xff : p.Reloads).ToList();
             var plannedAutoReload = players.Select(p => p.AutoReload).ToList();
             var plannedFullAuto   = players.Select(p => p.FullAuto).ToList();
             var plannedAmmo       = players.Select(p => p.Ammo).ToList();
             var plannedSleep      = players.Select(p => p.SleepTimeout).ToList();
-
-            lock (_lock)
-            {
-                _plannedNames      = plannedNames;
-                _plannedTeams      = plannedTeams;
-                _plannedHp         = plannedHp;
-                _plannedShields    = plannedShields;
-                _plannedReloads    = plannedReloads;
-                _plannedAutoReload = plannedAutoReload;
-                _plannedFullAuto   = plannedFullAuto;
-                _plannedAmmo       = plannedAmmo;
-                _plannedSleep      = plannedSleep;
-                _lastNamedPlayerCount = 0;
-            }
-            _countdownStartedAtMs = 0;
-            _gameStartedAtMs = 0;
-
-            // Persist player names/settings so they reload next session.
-            PlayerSettings.Save(players.Count, players.Select(p => new PlayerSettings.PlayerRow
-            {
-                Name           = p.Name ?? "",
-                TeamPreference = p.TeamPreferenceLabel ?? "Auto",
-                Hp             = p.Hp?.ToString()      ?? "",
-                Shields        = p.Shields?.ToString() ?? "",
-                Reloads        = p.Reloads?.ToString() ?? "",
-                AutoReload     = p.AutoReload ?? false,
-                FullAuto       = p.FullAuto   ?? false,
-                Ammo           = p.Ammo?.ToString()         ?? "",
-                SleepTimeout   = p.SleepTimeout?.ToString() ?? "",
-            }));
 
             // Release the standby connection before HostGun opens its own connection.
             DisconnectPreConnect();
@@ -289,15 +303,23 @@ public sealed class HostGunService : IAsyncDisposable
             await Task.Delay(StartDelayMs);
 
             int reloads = req.GlobalReloads ?? 0;
-            bool needsEnhanced = req.DisableIff || req.DisableHitRegister
-                              || req.AutoReload  || req.FullAuto
-                              || players.Any(p => p.AutoReload == true || p.FullAuto == true);
+            bool forceStandardHosting = GameModeCatalog.GetOrNull(req.GameType)?.RequiresStandardHosting == true;
+            bool needsEnhanced = !forceStandardHosting && (
+                                  req.DisableIff || req.DisableHitRegister
+                               || req.AutoReload || req.FullAuto
+                               || req.GlobalStartingAmmo > 0 || req.GlobalSleepTimeout > 0
+                               || req.GlobalHp > BinaryCodedDecimal.MaxDecimalValue || req.GlobalShields > BinaryCodedDecimal.MaxDecimalValue
+                               || req.CountdownSeconds > BinaryCodedDecimal.MaxDecimalValue
+                               || players.Any(p => p.AutoReload == true || p.FullAuto == true
+                                                || p.Ammo.HasValue || p.SleepTimeout.HasValue
+                                                || p.Hp > BinaryCodedDecimal.MaxDecimalValue || p.Shields > BinaryCodedDecimal.MaxDecimalValue));
 
             var def = new GameDefinition
             {
                 GameType             = req.GameType,
                 GameId               = new RandomId(),
                 GameTimeMinutes      = req.Minutes,
+                PlannedPlayerCount   = players.Count,
                 Tags                 = req.GlobalHp,
                 Shields              = req.GlobalShields,
                 Reloads              = reloads == 0 ? 0xff : reloads,
@@ -317,10 +339,18 @@ public sealed class HostGunService : IAsyncDisposable
                 UseStandardLtarBeacons           = false,
             };
 
-            var hg = new HostGun(_relayAddress);
+            var hg = startingHost = await Task.Run(() => new HostGun(_relayAddress, RecordDiagnostic));
+            if (!hg.Protocol.IsConnected)
+            {
+                MutateTelemetry(t => t with { RelayConnected = false });
+                await PushTelemetryAsync();
+                return (false, $"Unable to connect to relay at {_relayAddress}.");
+            }
+
             hg.PlayerListChanged   += HostGun_PlayerListChanged;
             hg.HostingStateChanged += HostGun_HostingStateChanged;
             hg.Protocol.IoError    += Protocol_IoError;
+            hg.SetPlannedPlayerNames(plannedNames);
             hg.SetPlannedTeamPreferences(plannedTeams);
             hg.SetPlannedTagsOverrides(plannedHp);
             hg.SetPlannedShieldsOverrides(plannedShields);
@@ -357,32 +387,40 @@ public sealed class HostGunService : IAsyncDisposable
                 },
             };
 
-            // Publish the host before StartServer because the library may raise synchronous
-            // lifecycle events during startup. A failed start is rolled back below.
+            // Startup callbacks wait on the lifecycle gate. Publish the opened lobby and its
+            // roster together before releasing them to the callbacks and operator consoles.
+            hg.StartServer(def);
             lock (_lock)
             {
                 _hostGun = hg;
+                activeGameHistory.UpdateLease = updateLease;
+                updateLease = null;
                 _activeGameHistory = activeGameHistory;
+                _plannedNames = plannedNames;
+                _telemetry = _telemetry with { RelayConnected = hg.Protocol.IsConnected };
             }
+            startingHost = null;
 
-            try
+            PlayerSettings.Save(players.Count, players.Select(p => new PlayerSettings.PlayerRow
             {
-                hg.StartServer(def);
-            }
-            catch
-            {
-                await CleanupHostCoreAsync(pushUpdates: false);
-                throw;
-            }
+                Name           = p.Name ?? "",
+                TeamPreference = p.TeamPreferenceLabel ?? "Auto",
+                Hp             = p.Hp?.ToString() ?? "",
+                Shields        = p.Shields?.ToString() ?? "",
+                Reloads        = p.Reloads?.ToString() ?? "",
+                AutoReload     = p.AutoReload ?? false,
+                FullAuto       = p.FullAuto ?? false,
+                Ammo           = p.Ammo?.ToString() ?? "",
+                SleepTimeout   = p.SleepTimeout?.ToString() ?? "",
+            }));
 
             _sessionGameCount++;
-            MutateTelemetry(t => t with { GamesStarted = t.GamesStarted + 1 });
             Volatile.Write(ref _nextPeriodicBroadcastAtMs, Environment.TickCount64 + ClientBroadcastIntervalMs);
             _updateTimer.Change(UpdateIntervalMs, UpdateIntervalMs);
 
             await PushLogAsync($"=== Game {_sessionGameCount} - {DateTime.Now:HH:mm} - {req.GameTypeLabel} ===");
             await PushLogAsync($"Hosting on {_relayAddress}. Waiting for players to join.");
-            await PushStateAsync();
+            await PushStateAndTelemetryAsync();
             return (true, "");
         }
         catch (Exception ex)
@@ -393,7 +431,9 @@ public sealed class HostGunService : IAsyncDisposable
         }
         finally
         {
-            _lifecycleGate.Release();
+            updateLease?.Dispose();
+            try { startingHost?.Protocol.Dispose(); }
+            finally { _lifecycleGate.Release(); }
         }
     }
 
@@ -433,13 +473,13 @@ public sealed class HostGunService : IAsyncDisposable
             string[] plannedNames;
             lock (_lock) { plannedNames = _plannedNames.ToArray(); }
 
-            var joinedPlayers = hg.Players.ToList();
+            var (joinedPlayers, nextSlot) = hg.WithStateLock(() => (hg.Players.ToList(), hg.NextPlannedSlotIndex));
             int joined = joinedPlayers.Count;
             if (plannedNames.Length > 0 && joined != plannedNames.Length)
             {
                 if (joined < plannedNames.Length)
                 {
-                    string waiting = plannedNames[joined];
+                    string waiting = plannedNames[nextSlot];
                     await PushLogAsync($"Still waiting for {waiting} to connect.");
                 }
                 else
@@ -480,7 +520,7 @@ public sealed class HostGunService : IAsyncDisposable
                 }
             }
 
-            bool ok = hg.StartCountdown();
+            bool ok = hg.WithStateLock(() => hg.StartCountdown());
             if (!ok) await PushLogAsync("Countdown not started - need at least two players.");
             return ok;
         }
@@ -490,35 +530,33 @@ public sealed class HostGunService : IAsyncDisposable
         }
     }
 
-    public async Task<bool> EndGameAsync()
+    // Callers hold the lifecycle gate from the identity check through the state change.
+    private bool IsCurrentGame(Guid gameId) => _activeGameHistory?.GameId == gameId.ToString("N");
+
+    public async Task<bool> EndGameAsync(Guid? gameId = null)
     {
         await _lifecycleGate.WaitAsync();
         try
         {
             var hg = _hostGun;
-            if (hg == null) return false;
+            if (hg == null || (gameId.HasValue && !IsCurrentGame(gameId.Value))) return false;
 
-            lock (_lock)
+            var previousState = hg.WithStateLock(() =>
             {
-                if (_activeGameHistory != null)
+                var state = hg.HostingState;
+                if (state is HostGun.HostingStates.Playing or HostGun.HostingStates.ResendCountdown
+                    or HostGun.HostingStates.Countdown)
                 {
-                    if (hg.HostingState is HostGun.HostingStates.Playing
-                        or HostGun.HostingStates.ResendCountdown
-                        or HostGun.HostingStates.Countdown)
-                    {
-                        _activeGameHistory.EndedEarly = true;
-                    }
-                    else if (hg.HostingState == HostGun.HostingStates.Summary)
-                    {
-                        // A second End Game during debriefing tells the library to stop waiting
-                        // for missing reports and transition immediately to GameOver.
-                        _activeGameHistory.Forced = true;
-                    }
+                    lock (_lock)
+                        if (_activeGameHistory != null) _activeGameHistory.EndedEarly = true;
                 }
-            }
+                hg.EndGame();
+                return state;
+            });
+            if (previousState is HostGun.HostingStates.Summary or HostGun.HostingStates.GameOver)
+                return true;
 
-            await PushLogAsync($"Game ended early (state: {hg.HostingState}).");
-            hg.EndGame();
+            await PushLogAsync($"End Game requested during {previousState}.");
             await Task.Delay(StartDelayMs);
 
             // Ending from the lobby/countdown transitions the library directly to Idle. Dispose
@@ -526,6 +564,22 @@ public sealed class HostGunService : IAsyncDisposable
             if (hg.HostingState == HostGun.HostingStates.Idle)
                 await CleanupHostCoreAsync(pushUpdates: false);
 
+            await PushStateAsync();
+            return true;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
+    public async Task<bool> FinishDebriefAsync(Guid gameId)
+    {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            if (!IsCurrentGame(gameId) || _hostGun?.FinishDebrief() != true) return false;
+            await PushLogAsync("Operator confirmed Finish with missing reports.");
             await PushStateAsync();
             return true;
         }
@@ -565,8 +619,11 @@ public sealed class HostGunService : IAsyncDisposable
         lock (_lock)
         {
             if (ReferenceEquals(_hostGun, hg)) _hostGun = null;
+            _activeGameHistory?.UpdateLease?.Dispose();
             _activeGameHistory = null;
-            _lastNamedPlayerCount = 0;
+            _plannedNames = [];
+            _countdownStartedAtMs = 0;
+            _gameStartedAtMs = 0;
         }
 
         if (hg != null)
@@ -577,11 +634,9 @@ public sealed class HostGunService : IAsyncDisposable
             try { hg.Protocol.Dispose(); } catch { /* best-effort */ }
         }
 
-        ClearPlannedPlayers();
-        _countdownStartedAtMs = 0;
-        _gameStartedAtMs = 0;
         MutateTelemetry(t => t with { RelayConnected = false });
 
+        if (Volatile.Read(ref _disposed) == 0) _updateTimer.Change(IdleBroadcastIntervalMs, IdleBroadcastIntervalMs);
         if (pushUpdates)
             await PushStateAndTelemetryAsync();
     }
@@ -594,8 +649,8 @@ public sealed class HostGunService : IAsyncDisposable
         lock (_lock)
         {
             session = _activeGameHistory;
-            if (session == null || session.ArchiveQueued || !ReferenceEquals(hg, _hostGun)) return;
-            session.ArchiveQueued = true;
+            if (session == null || session.ArchiveCaptured || !ReferenceEquals(hg, _hostGun)) return;
+            session.ArchiveCaptured = true;
             session.EndedAtUtc ??= DateTimeOffset.UtcNow;
         }
 
@@ -609,7 +664,7 @@ public sealed class HostGunService : IAsyncDisposable
         {
             lock (_lock)
             {
-                if (ReferenceEquals(session, _activeGameHistory)) session.ArchiveQueued = false;
+                if (ReferenceEquals(session, _activeGameHistory)) session.ArchiveCaptured = false;
             }
             _log.LogError(ex, "Unable to capture completed game {GameId}; cleanup will retry", session.GameId);
         }
@@ -617,146 +672,129 @@ public sealed class HostGunService : IAsyncDisposable
 
     private static CompletedGameRecord CreateCompletedGameRecord(HostGun hg, ActiveGameHistory session)
     {
-        var definition = hg.GameDefinition;
-        bool isTeamGame = definition.IsTeamGame;
-        var players = hg.Players.ToList();
-        bool allPlayersDebriefed = players.Count > 0
-            && players.All(player => !player.Dropped && player.AllTagReportsReceived());
-
-        return new CompletedGameRecord
+        return hg.WithStateLock(() =>
         {
-            GameId = session.GameId,
-            ProtocolGameId = definition.GameId?.ToString() ?? "",
-            SoftwareVersion = GetSoftwareVersion(),
-            GameTypeId = (int)definition.GameType,
-            GameTypeName = definition.GameType.ToString(),
-            GameTypeLabel = session.GameTypeLabel,
-            IsTeamGame = isTeamGame,
-            HostedAtUtc = session.HostedAtUtc,
-            StartedAtUtc = session.StartedAtUtc ?? session.HostedAtUtc,
-            EndedAtUtc = session.EndedAtUtc!.Value,
-            EndedEarly = session.EndedEarly,
-            Forced = session.Forced,
-            AllPlayersDebriefed = allPlayersDebriefed,
-            Settings = session.Settings,
-            Players = players
-                .OrderBy(player => player.TeamPlayerId.PlayerNumber)
-                .Select(player => new GameHistoryPlayer
-                {
-                    Id = player.TeamPlayerId.ToString(isTeamGame),
-                    Team = isTeamGame ? player.TeamPlayerId.TeamNumber : 0,
-                    Slot = isTeamGame
-                        ? player.TeamPlayerId.TeamPlayerNumber
-                        : player.TeamPlayerId.PlayerNumber,
-                    Name = player.Name ?? "",
-                    TaggerId = (byte)player.TaggerId,
-                    Score = player.Score,
-                    Rank = player.Rank,
-                    HitsScored = hg.CountEffectiveHitsScored(player),
-                    HitsTaken = player.TagsTaken,
-                    Confirmed = player.Confirmed,
-                    Dropped = player.Dropped,
-                    DebriefComplete = !player.Dropped && player.AllTagReportsReceived(),
-                    Hp = player.TagsOverride ?? definition.Tags,
-                    Shields = player.ShieldsOverride ?? definition.Shields,
-                    Reloads = player.ReloadsOverride ?? definition.Reloads,
-                    AutoReload = player.AutoReloadOverride ?? definition.AutomaticReload,
-                    FullAuto = player.FullAutoOverride ?? definition.AllowFullAuto,
-                    StartingAmmo = player.StartingAmmoOverride ?? definition.StartingAmmo,
-                    SleepTimeoutMinutes = player.SleepTimeoutOverride ?? definition.SleepTimeoutMinutes,
-                })
-                .ToList(),
-            Teams = isTeamGame
-                ? hg.Teams
-                    .OrderBy(team => team.Number)
-                    .Select(team => new GameHistoryTeam
+            var definition = hg.GameDefinition;
+            bool isTeamGame = definition.IsTeamGame;
+            var players = hg.Players.ToList();
+            return new CompletedGameRecord
+            {
+                GameId = session.GameId,
+                ProtocolGameId = definition.GameId?.ToString() ?? "",
+                SoftwareVersion = GetSoftwareVersion(),
+                GameTypeId = (int)definition.GameType,
+                GameTypeName = definition.GameType.ToString(),
+                GameTypeLabel = session.GameTypeLabel,
+                IsTeamGame = isTeamGame,
+                HostedAtUtc = session.HostedAtUtc,
+                StartedAtUtc = session.StartedAtUtc ?? session.HostedAtUtc,
+                EndedAtUtc = session.EndedAtUtc!.Value,
+                EndedEarly = session.EndedEarly,
+                Forced = hg.DebriefForced,
+                AllPlayersDebriefed = hg.AllPlayersDebriefed,
+                PartialResults = hg.PartialScores,
+                Settings = session.Settings,
+                Players = players
+                    .OrderBy(player => player.TeamPlayerId.PlayerNumber)
+                    .Select(player => new GameHistoryPlayer
                     {
-                        Team = team.Number,
-                        Score = team.Score,
-                        Rank = team.Rank,
-                        PlayerCount = players.Count(player => player.TeamPlayerId.TeamNumber == team.Number),
+                        Id = player.TeamPlayerId.ToString(isTeamGame),
+                        Team = isTeamGame ? player.TeamPlayerId.TeamNumber : 0,
+                        Slot = isTeamGame
+                            ? player.TeamPlayerId.TeamPlayerNumber
+                            : player.TeamPlayerId.PlayerNumber,
+                        Name = player.Name ?? "",
+                        TaggerId = (byte)player.TaggerId,
+                        Score = player.Score,
+                        Rank = player.Rank,
+                        HitsScored = hg.CountEffectiveHitsScored(player),
+                        HitsTaken = player.TagsTaken,
+                        Confirmed = player.Confirmed,
+                        Dropped = player.Dropped,
+                        DebriefComplete = !player.Dropped && player.AllTagReportsReceived(),
+                        Hp = player.TagsOverride ?? definition.Tags,
+                        Shields = player.ShieldsOverride ?? definition.Shields,
+                        Reloads = player.ReloadsOverride ?? definition.Reloads,
+                        AutoReload = player.AutoReloadOverride ?? definition.AutomaticReload,
+                        FullAuto = player.FullAutoOverride ?? definition.AllowFullAuto,
+                        StartingAmmo = player.StartingAmmoOverride ?? definition.StartingAmmo,
+                        SleepTimeoutMinutes = player.SleepTimeoutOverride ?? definition.SleepTimeoutMinutes,
                     })
-                    .ToList()
-                : [],
-        };
+                    .ToList(),
+                Teams = isTeamGame
+                    ? hg.Teams
+                        .OrderBy(team => team.Number)
+                        .Select(team => new GameHistoryTeam
+                        {
+                            Team = team.Number,
+                            Score = team.Score,
+                            Rank = team.Rank,
+                            PlayerCount = players.Count(player => player.TeamPlayerId.TeamNumber == team.Number),
+                        })
+                        .ToList()
+                    : [],
+            };
+        });
     }
 
     private void TrackHistoryWrite(CompletedGameRecord record)
     {
-        // The initial yield guarantees no file operation runs inline while the lifecycle gate
-        // is held. The immutable record no longer references HostGun or the active session.
-        var writeTask = PersistHistoryWithRetryAsync(record, _historyWriteCancellation.Token);
-        lock (_lock) { _pendingHistoryWrites.Add(writeTask); }
-        _ = ObserveHistoryWriteAsync(writeTask, record.GameId);
+        lock (_lock)
+        {
+            var pending = new PendingHistoryWrite();
+            if (!_pendingHistoryWrites.TryAdd(record.GameId, pending)) return;
+            if (_activeGameHistory?.GameId == record.GameId)
+            {
+                pending.UpdateLease = _activeGameHistory.UpdateLease;
+                _activeGameHistory.UpdateLease = null;
+            }
+            pending.Write = PersistHistoryWithRetryAsync(record, pending, _historyWriteCancellation.Token);
+        }
     }
 
     private async Task PersistHistoryWithRetryAsync(
         CompletedGameRecord record,
+        PendingHistoryWrite pending,
         CancellationToken cancellationToken)
     {
         await Task.Yield();
-
-        for (int attempt = 1; attempt <= HistorySaveAttempts; attempt++)
-        {
-            if (cancellationToken.IsCancellationRequested) return;
-
-            bool saved;
-            try
-            {
-                saved = await _history.SaveAsync(record, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "History save attempt {Attempt} failed for game {GameId}",
-                    attempt, record.GameId);
-                saved = false;
-            }
-
-            if (saved)
-            {
-                _log.LogInformation("Archived completed game {GameId}", record.GameId);
-                return;
-            }
-
-            if (attempt == HistorySaveAttempts) break;
-
-            var retryDelay = TimeSpan.FromMilliseconds(250 * (1 << (attempt - 1)));
-            _log.LogWarning(
-                "Retrying history save for game {GameId} in {RetryDelayMs} ms (attempt {NextAttempt} of {Attempts})",
-                record.GameId, retryDelay.TotalMilliseconds, attempt + 1, HistorySaveAttempts);
-            try
-            {
-                await Task.Delay(retryDelay, cancellationToken);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                return;
-            }
-        }
-
-        _log.LogError("Unable to archive completed game {GameId} after {Attempts} attempts; gameplay continued",
-            record.GameId, HistorySaveAttempts);
-    }
-
-    private async Task ObserveHistoryWriteAsync(Task writeTask, string gameId)
-    {
+        int delayMs = 250;
+        bool saved = false;
         try
         {
-            await writeTask;
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                try
+                {
+                    saved = await _history.SaveAsync(record, cancellationToken);
+                    if (saved) return;
+                }
+                catch (Exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    // The store logs its I/O failures. A log provider can also fail during
+                    // a storage outage. Keep the record eligible for its next attempt.
+                }
+                lock (_lock) { pending.Retrying = true; }
+                if (_historyDraining.Task.IsCompleted)
+                    await Task.Delay(250, cancellationToken);
+                else
+                    await Task.WhenAny(Task.Delay(delayMs, cancellationToken), _historyDraining.Task);
+                delayMs = Math.Min(delayMs * 2, 30000);
+            }
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // PersistHistoryWithRetryAsync contains its own operational error handling. Keep
-            // this final guard so an unexpected task fault is always observed and logged.
-            _log.LogError(ex, "Unexpected history writer failure for game {GameId}", gameId);
+            // Shutdown reports the outstanding writes together.
         }
         finally
         {
-            lock (_lock) { _pendingHistoryWrites.Remove(writeTask); }
+            lock (_lock)
+            {
+                pending.UpdateLease?.Dispose();
+                _pendingHistoryWrites.Remove(record.GameId);
+                if (saved) _telemetry = _telemetry with { HistoryWritesCompleted = _telemetry.HistoryWritesCompleted + 1 };
+            }
         }
     }
 
@@ -770,49 +808,90 @@ public sealed class HostGunService : IAsyncDisposable
 
     public GameStateSnapshot GetGameState()
     {
-        var hg = _hostGun;
-        if (hg == null)
-            return new GameStateSnapshot { State = "Idle", GuidedJoinHint = GetJoinHint() };
+        while (true)
+        {
+            HostGun? host;
+            lock (_lock)
+            {
+                host = _hostGun;
+                if (host == null)
+                    return new GameStateSnapshot { ServerInstance = _serverInstance, Revision = ++_snapshotRevision };
+            }
+
+            var snapshot = host.WithStateLock(() => CaptureGameState(host));
+            if (snapshot != null) return snapshot;
+        }
+    }
+
+    private GameStateSnapshot? CaptureGameState(HostGun hg)
+    {
+        string[] plannedNames;
+        string gameTypeLabel;
+        GameHistorySettings? activeSettings;
+        string? gameId;
+        long revision;
+        lock (_lock)
+        {
+            if (!ReferenceEquals(hg, _hostGun)) return null;
+            revision = ++_snapshotRevision;
+            plannedNames = _plannedNames.ToArray();
+            gameTypeLabel = _activeGameHistory?.GameTypeLabel ?? "";
+            activeSettings = _activeGameHistory?.Settings;
+            gameId = _activeGameHistory?.GameId;
+        }
 
         var definition = hg.GameDefinition;
         var hostingState = hg.HostingState;
         bool isTeam = definition?.IsTeamGame ?? false;
-        int plannedPlayerCount;
-        string gameTypeLabel;
-        GameHistorySettings? activeSettings;
-        bool hasActiveHistory;
-        bool forcedCompletion;
-        lock (_lock)
-        {
-            plannedPlayerCount = _plannedNames.Count;
-            gameTypeLabel = _activeGameHistory?.GameTypeLabel ?? definition?.GameType.ToString() ?? "";
-            activeSettings = _activeGameHistory?.Settings;
-            hasActiveHistory = _activeGameHistory != null;
-            forcedCompletion = _activeGameHistory?.Forced == true;
-        }
-
+        var mode = definition == null ? null : GameModeCatalog.GetOrNull(definition.GameType);
         var players = hg.Players
             .OrderBy(player => player.TeamPlayerId.PlayerNumber)
             .ToList();
-        bool resultsFinalized = hasActiveHistory
+
+        bool resultsFinalized = gameId != null
             && hostingState == HostGun.HostingStates.GameOver
-            && !forcedCompletion
-            && players.Count > 0
-            && players.All(player => !player.Dropped && player.AllTagReportsReceived());
+            && hg.AllPlayersDebriefed;
+        bool partialResults = gameId != null
+            && hostingState == HostGun.HostingStates.GameOver
+            && hg.PartialScores;
+
+        int nextSlot = hg.NextPlannedSlotIndex;
+        string guidedJoinHint;
+        if (nextSlot < plannedNames.Length)
+            guidedJoinHint = $"Waiting for {plannedNames[nextSlot]} to connect.";
+        else if (plannedNames.Length > 0)
+            guidedJoinHint = "All players connected - tap Countdown when ready.";
+        else
+            guidedJoinHint = "Players may join.";
 
         return new GameStateSnapshot
         {
+            ServerInstance = _serverInstance,
+            Revision = revision,
+            GameId               = gameId,
             State                = hg.GetGameStateText(),
             HostingState         = hostingState.ToString(),
             GameTypeId           = definition == null ? 0 : (int)definition.GameType,
-            GameTypeLabel        = gameTypeLabel,
+            GameTypeCode         = mode?.Code ?? "",
+            GameTypeLabel        = string.IsNullOrWhiteSpace(gameTypeLabel)
+                ? mode?.Label ?? definition?.GameType.ToString() ?? ""
+                : gameTypeLabel,
+            GameObjective        = mode?.Objective ?? "",
+            GameOperatorNote     = mode?.OperatorNote ?? "",
+            RoleCycleSeconds     = mode?.RoleCycleSeconds ?? 0,
+            ReverseHuntDirection = definition?.GameTypeInfo.ReverseHuntDirection ?? false,
+            RequiresStandardHosting = mode?.RequiresStandardHosting ?? false,
             IsTeamGame           = isTeam,
             TeamCount            = isTeam ? definition?.TeamCount ?? 0 : 0,
-            PlannedPlayerCount   = plannedPlayerCount,
+            PlannedPlayerCount   = plannedNames.Length,
             ResultsFinalized     = resultsFinalized,
+            PartialResults       = partialResults,
             Settings             = activeSettings,
-            GuidedJoinHint       = GetJoinHint(),
-            CountdownSeconds     = definition?.CountdownTimeSeconds ?? 30,
+            GuidedJoinHint       = guidedJoinHint,
+            PhaseRemainingMs     = hostingState is HostGun.HostingStates.Playing or HostGun.HostingStates.Countdown or HostGun.HostingStates.ResendCountdown
+                ? hg.PhaseRemainingMilliseconds : null,
+            CountdownSeconds     = hostingState == HostGun.HostingStates.ResendCountdown
+                ? definition?.ResendCountdownTimeSeconds ?? 10 : definition?.CountdownTimeSeconds ?? 30,
             GameMinutes          = definition?.GameTimeMinutes ?? 10,
             ServerTimeMs         = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             CountdownStartedAtMs = _countdownStartedAtMs,
@@ -827,6 +906,7 @@ public sealed class HostGunService : IAsyncDisposable
                         : p.TeamPlayerId.PlayerNumber,
                     Name         = p.Name ?? "",
                     Confirmed    = p.Confirmed,
+                    Dropped      = p.Dropped,
                     // Detailed LTAR reports may count repeated IR frames. Publish only
                     // effective accepted hits so the TV agrees with HP and final score.
                     HitsScored   = hg.CountEffectiveHitsScored(p),
@@ -834,7 +914,7 @@ public sealed class HostGunService : IAsyncDisposable
                     Score        = p.Score,
                     Rank         = p.Rank,
                     TaggerId     = p.TaggerId,
-                    AllDebriefed = p.AllTagReportsReceived(),
+                    AllDebriefed = !p.Dropped && p.AllTagReportsReceived(),
                 }).ToList(),
             Teams = isTeam
                 ? hg.Teams
@@ -854,120 +934,28 @@ public sealed class HostGunService : IAsyncDisposable
 
     // ── Guided join hint ──────────────────────────────────────────────────────────
 
-    private string GetJoinHint()
-    {
-        HostGun? hg;
-        string[] plannedNames;
-        lock (_lock)
-        {
-            hg = _hostGun;
-            plannedNames = _plannedNames.ToArray();
-        }
-
-        if (hg == null)
-            return plannedNames.Length == 0 ? "" : $"Turn on {plannedNames[0]}'s gun first.";
-
-        int joined = hg.Players.Count;
-        if (joined < plannedNames.Length)
-            return $"Waiting for {plannedNames[joined]} to connect.";
-        if (plannedNames.Length > 0)
-            return "All players connected - tap Countdown when ready.";
-        return "Players may join.";
-    }
-
-    private void ApplyGuidedNames()
-    {
-        HostGun? hg;
-        string[] plannedNames;
-        int?[] plannedHp;
-        int?[] plannedShields;
-        int?[] plannedReloads;
-        bool?[] plannedAutoReload;
-        bool?[] plannedFullAuto;
-        int?[] plannedAmmo;
-        int?[] plannedSleep;
-
-        lock (_lock)
-        {
-            hg = _hostGun;
-            plannedNames      = _plannedNames.ToArray();
-            plannedHp         = _plannedHp.ToArray();
-            plannedShields    = _plannedShields.ToArray();
-            plannedReloads    = _plannedReloads.ToArray();
-            plannedAutoReload = _plannedAutoReload.ToArray();
-            plannedFullAuto   = _plannedFullAuto.ToArray();
-            plannedAmmo       = _plannedAmmo.ToArray();
-            plannedSleep      = _plannedSleep.ToArray();
-        }
-
-        if (hg == null || plannedNames.Length == 0) return;
-
-        var joined = hg.Players.ToList();
-        for (int i = 0; i < joined.Count && i < plannedNames.Length; i++)
-        {
-            var p = joined[i];
-            var name = plannedNames[i];
-
-            // Set name if not already set correctly
-            if (string.IsNullOrWhiteSpace(p.Name) || p.Name != name)
-                hg.SetPlayerName(p.TeamPlayerId, name);
-
-            // Apply per-player overrides only on first assignment (HasValue guards prevent re-applying)
-            if (i < plannedHp.Length         && !p.TagsOverride.HasValue         && plannedHp[i].HasValue)
-                hg.SetPlayerTagsOverride(p.TeamPlayerId, plannedHp[i]);
-            if (i < plannedShields.Length    && !p.ShieldsOverride.HasValue      && plannedShields[i].HasValue)
-                hg.SetPlayerShieldsOverride(p.TeamPlayerId, plannedShields[i]);
-            if (i < plannedReloads.Length    && !p.ReloadsOverride.HasValue      && plannedReloads[i].HasValue)
-                hg.SetPlayerReloadsOverride(p.TeamPlayerId, plannedReloads[i]);
-            if (i < plannedAutoReload.Length && !p.AutoReloadOverride.HasValue   && plannedAutoReload[i].HasValue)
-                hg.SetPlayerAutoReloadOverride(p.TeamPlayerId, plannedAutoReload[i]);
-            if (i < plannedFullAuto.Length   && !p.FullAutoOverride.HasValue     && plannedFullAuto[i].HasValue)
-                hg.SetPlayerFullAutoOverride(p.TeamPlayerId, plannedFullAuto[i]);
-            if (i < plannedAmmo.Length       && !p.StartingAmmoOverride.HasValue && plannedAmmo[i].HasValue)
-                hg.SetPlayerStartingAmmoOverride(p.TeamPlayerId, plannedAmmo[i]);
-            if (i < plannedSleep.Length      && !p.SleepTimeoutOverride.HasValue && plannedSleep[i].HasValue)
-                hg.SetPlayerSleepTimeoutOverride(p.TeamPlayerId, plannedSleep[i]);
-        }
-
-        // Log when a new player joins. Update the counter under the same lock used by cleanup.
-        bool shouldLog;
-        lock (_lock)
-        {
-            shouldLog = joined.Count > _lastNamedPlayerCount;
-            if (shouldLog) _lastNamedPlayerCount = joined.Count;
-        }
-
-        if (shouldLog)
-        {
-            var newest = joined.Last();
-            string displayName = joined.Count <= plannedNames.Length
-                ? plannedNames[joined.Count - 1]
-                : newest.DisplayName;
-            _ = PushLogAsync($"Guided Join: {displayName} -> {newest.TeamPlayerId.ToString(hg.GameDefinition?.IsTeamGame ?? false)}.");
-        }
-    }
-
     // ── Event handlers ────────────────────────────────────────────────────────────
 
     private async void OnUpdateTick(object? _)
     {
         var hg = _hostGun;
-        if (hg == null) return;
+        if (hg != null)
+        {
+            if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0) return;
 
-        if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0) return;
-
-        try
-        {
-            hg.Update();
-        }
-        catch (Exception ex)
-        {
-            _log.LogError(ex, "Update tick error");
-            return;
-        }
-        finally
-        {
-            Interlocked.Exchange(ref _isUpdating, 0);
+            try
+            {
+                hg.Update();
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex, "Update tick error");
+                return;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _isUpdating, 0);
+            }
         }
 
         if (!TryBeginPeriodicBroadcast()) return;
@@ -993,7 +981,6 @@ public sealed class HostGunService : IAsyncDisposable
         {
             if (!IsCurrentHost(sender)) return;
 
-            ApplyGuidedNames();
             await PushStateAndTelemetryAsync();
         }
         catch (Exception ex)
@@ -1022,6 +1009,8 @@ public sealed class HostGunService : IAsyncDisposable
             else if (e.State == HostGun.HostingStates.Playing)
             {
                 _gameStartedAtMs = transitionAtUtc.ToUnixTimeMilliseconds();
+                if (e.PreviousState != HostGun.HostingStates.Playing)
+                    MutateTelemetry(t => t with { GamesStarted = t.GamesStarted + 1 });
                 lock (_lock)
                 {
                     if (_activeGameHistory != null)
@@ -1070,7 +1059,8 @@ public sealed class HostGunService : IAsyncDisposable
         {
             if (!IsCurrentProtocol(sender)) return;
 
-            MutateTelemetry(t => t with { IoErrors = t.IoErrors + 1, RelayConnected = false });
+            var protocol = (LazerTagProtocol)sender!;
+            MutateTelemetry(t => t with { IoErrors = t.IoErrors + 1, RelayConnected = protocol.IsConnected });
             await PushTelemetryAsync();
         }
         catch (Exception ex)
@@ -1118,30 +1108,37 @@ public sealed class HostGunService : IAsyncDisposable
         }
     }
 
-    private void OnLibraryLog(object? sender, Log.EntryAddedEventArgs e)
+    private void RecordDiagnostic(HostDiagnostic diagnostic)
     {
-        // WARNING: These string prefixes must match LazerTagHostLibrary's Log.Add() calls.
-        // If the library log messages change, these counters will silently stop working.
-        var m = e.Entry.Message;
-        MutateTelemetry(t => m switch
+        MutateTelemetry(t => diagnostic switch
         {
-            _ when m.StartsWith("TCP relay connected")                 => t with { RelayConnectedCount  = t.RelayConnectedCount  + 1, RelayConnected = true  },
-            _ when m.StartsWith("TCP connection timed out")            => t with { RelayTimeouts        = t.RelayTimeouts        + 1, RelayConnected = false },
-            _ when m.StartsWith("Explicit state machine: packet kind") => t with { UnexpectedPackets    = t.UnexpectedPackets    + 1 },
-            _ when m.StartsWith("Explicit state machine timeout")      => t with { StateTimeouts        = t.StateTimeouts        + 1 },
-            _ when m.StartsWith("Connect() failed")                    => t with { RelayConnectFailures = t.RelayConnectFailures + 1 },
-            // GamesCompleted is tracked via HostingStateChanged - do NOT also increment here
-            _                                                          => t,
+            HostDiagnostic.RelayConnectAttempt => t with { RelayConnectAttempts = t.RelayConnectAttempts + 1 },
+            HostDiagnostic.RelayConnected => t with { RelayConnectedCount = t.RelayConnectedCount + 1 },
+            HostDiagnostic.RelayConnectionRefused => t with { RelayConnectFailures = t.RelayConnectFailures + 1, RelayConnectionRefusals = t.RelayConnectionRefusals + 1 },
+            HostDiagnostic.RelayConnectTimeout => t with { RelayConnectFailures = t.RelayConnectFailures + 1, RelayTimeouts = t.RelayTimeouts + 1 },
+            HostDiagnostic.RelayHandshakeFailed => t with { RelayConnectFailures = t.RelayConnectFailures + 1, RelayHandshakeFailures = t.RelayHandshakeFailures + 1 },
+            HostDiagnostic.RelayHandshakeTimeout => t with
+            {
+                RelayConnectFailures = t.RelayConnectFailures + 1,
+                RelayHandshakeFailures = t.RelayHandshakeFailures + 1,
+                RelayTimeouts = t.RelayTimeouts + 1,
+            },
+            HostDiagnostic.RelayConnectFailed => t with { RelayConnectFailures = t.RelayConnectFailures + 1 },
+            HostDiagnostic.RelayWriteRejected => t with { RelayWriteRejections = t.RelayWriteRejections + 1 },
+            HostDiagnostic.UnexpectedPacket => t with { UnexpectedPackets = t.UnexpectedPackets + 1 },
+            HostDiagnostic.StateTimeout => t with { StateTimeouts = t.StateTimeouts + 1 },
+            _ => t,
         });
-
-        _ = PushLogAsync($"[{e.Entry.Time:HH:mm:ss}] {e.Entry.Severity}: {m}");
     }
+
+    private void OnLibraryLog(object? sender, Log.EntryAddedEventArgs e)
+        => _ = PushLogAsync($"[{e.Entry.Time:HH:mm:ss}] {e.Entry.Severity}: {e.Entry.Message}");
 
     // ── SignalR push helpers ───────────────────────────────────────────────────────
 
     private bool TryBeginPeriodicBroadcast()
     {
-        if (!GameHub.HasClients) return false;
+        if (!_connections.HasClients) return false;
 
         var now = Environment.TickCount64;
         if (now < Volatile.Read(ref _nextPeriodicBroadcastAtMs)) return false;
@@ -1151,9 +1148,9 @@ public sealed class HostGunService : IAsyncDisposable
         return true;
     }
 
-    private Task PushLogAsync(string msg)  => GameHub.HasClients ? _hub.Clients.Group(GameHub.OperatorsGroup).SendAsync("Log", msg) : Task.CompletedTask;
-    private Task PushStateAsync()          => GameHub.HasClients ? _hub.Clients.All.SendAsync("State",     GetGameState()) : Task.CompletedTask;
-    private Task PushTelemetryAsync()      => GameHub.HasClients ? _hub.Clients.All.SendAsync("Telemetry", Telemetry) : Task.CompletedTask;
+    private Task PushLogAsync(string msg)  => _connections.SendLogAsync(_hub, msg);
+    private Task PushStateAsync()          => _connections.HasClients ? _hub.Clients.All.SendAsync("State", GetGameState()) : Task.CompletedTask;
+    private Task PushTelemetryAsync()      => _connections.HasClients ? _hub.Clients.All.SendAsync("Telemetry", Telemetry) : Task.CompletedTask;
     private Task PushStateAndTelemetryAsync() => Task.WhenAll(PushStateAsync(), PushTelemetryAsync());
 
     // ── Relay helpers ─────────────────────────────────────────────────────────────
@@ -1168,25 +1165,6 @@ public sealed class HostGunService : IAsyncDisposable
         try { s.Dispose();    } catch { /* best-effort */ }
     }
 
-    private void ClearPlannedPlayers()
-    {
-        lock (_lock)
-        {
-            // Replace the collections rather than mutating them in place so any event handler
-            // already using a snapshot can finish safely during cleanup.
-            _plannedNames      = [];
-            _plannedTeams      = [];
-            _plannedHp         = [];
-            _plannedShields    = [];
-            _plannedReloads    = [];
-            _plannedAutoReload = [];
-            _plannedFullAuto   = [];
-            _plannedAmmo       = [];
-            _plannedSleep      = [];
-            _lastNamedPlayerCount = 0;
-        }
-    }
-
     private async Task WaitForUpdateTickAsync()
     {
         // A timer callback may already be inside HostGun.Update when cleanup begins. Give it a
@@ -1197,8 +1175,9 @@ public sealed class HostGunService : IAsyncDisposable
 
     private async Task WaitForPendingHistoryWritesAsync()
     {
+        _historyDraining.TrySetResult();
         Task[] pending;
-        lock (_lock) { pending = _pendingHistoryWrites.ToArray(); }
+        lock (_lock) { pending = _pendingHistoryWrites.Values.Select(entry => entry.Write).ToArray(); }
 
         if (pending.Length == 0)
         {
@@ -1225,10 +1204,10 @@ public sealed class HostGunService : IAsyncDisposable
             return;
         }
 
+        _historyWriteCancellation.Cancel();
         _log.LogWarning(
             "Shutdown waited {WaitSeconds} seconds for {WriteCount} history write(s); cancelling remaining retries",
             HistoryShutdownWait.TotalSeconds, pending.Length);
-        _historyWriteCancellation.Cancel();
         // A storage call already inside an uninterruptible filesystem flush may outlive the
         // service shutdown timeout. Leave the token source undisposed for that bounded case.
     }

@@ -37,6 +37,7 @@ namespace LazerTagServerApp
         private Button _startCountdownButton;
         private Button _endGameButton;
         private Button _nextButton;
+        private Button _finishDebriefButton;
         private Button _saveLogButton;
         private Label _statusLabel;
         private Label _relayStatusLabel;
@@ -65,7 +66,6 @@ namespace LazerTagServerApp
         private readonly List<bool?> _plannedFullAutoOverrides = new List<bool?>();
         private readonly List<int?> _plannedStartingAmmoOverrides = new List<int?>();
         private readonly List<int?> _plannedSleepTimeoutOverrides = new List<int?>();
-        private int _lastNamedPlayerCount;
 
         private int _telemetryRelayConnectAttempts;
         private int _telemetryRelayConnectedCount;
@@ -248,6 +248,8 @@ namespace LazerTagServerApp
             _endGameButton.Click += EndGameButton_Click;
             _nextButton = new Button { Text = "Next / Summary", Height = 34, Width = 120 };
             _nextButton.Click += NextButton_Click;
+            _finishDebriefButton = new Button { Text = "Finish with missing reports", Height = 34, Width = 190, Visible = false };
+            _finishDebriefButton.Click += (s, e) => GameWindow.ConfirmFinishDebrief(this, _hostGun);
             _saveLogButton = new Button { Text = "Save Log", Height = 34, Width = 90 };
             _saveLogButton.Click += SaveLogButton_Click;
 
@@ -256,6 +258,7 @@ namespace LazerTagServerApp
             buttonsPanel.Controls.Add(_endGameButton);
             buttonsPanel.Controls.Add(_nextButton);
             buttonsPanel.Controls.Add(_saveLogButton);
+            buttonsPanel.Controls.Add(_finishDebriefButton);
 
             // ── Player setup grid (fixed height, outside topPanel for full width) ─
             _plannedPlayersGrid = new DataGridView();
@@ -491,6 +494,7 @@ namespace LazerTagServerApp
             StyleButton(_startCountdownButton, Color.FromArgb(20, 80, 140), Color.White);
             StyleButton(_endGameButton,        Color.FromArgb(140, 30, 30), Color.White);
             StyleButton(_nextButton,           DkBgHover, DkTextMuted);
+            StyleButton(_finishDebriefButton,  DkBgHover, DkTextMuted);
             StyleButton(_saveLogButton,        DkBgHover, DkTextMuted);
             StyleButton(_refreshPortsButton,   DkBgHover, DkTextMuted);
             StyleButton(_connectButton,        Color.FromArgb(20, 80, 140), Color.White);
@@ -813,69 +817,6 @@ namespace LazerTagServerApp
             }
         }
 
-        private void ApplyGuidedNames()
-        {
-            if (_hostGun == null) return;
-            if (_plannedNames.Count == 0) return;
-
-            // Important: guided join names should follow actual join/assignment order,
-            // not sorted TeamPlayerId order. Re-sorting can make the display/logs drift
-            // from the real player that just connected.
-            var joinedPlayers = _hostGun.Players.ToList();
-
-            int namedCount = 0;
-            for (int i = 0; i < joinedPlayers.Count && i < _plannedNames.Count; i++)
-            {
-                var player = joinedPlayers[i];
-                var plannedName = _plannedNames[i];
-
-                if (string.IsNullOrWhiteSpace(player.Name) || player.Name != plannedName)
-                {
-                    _hostGun.SetPlayerName(player.TeamPlayerId, plannedName);
-                }
-
-                if (!string.IsNullOrWhiteSpace(plannedName)) namedCount++;
-
-                // Apply per-player overrides only if not already set
-                if (i < _plannedHpOverrides.Count && !player.TagsOverride.HasValue && _plannedHpOverrides[i].HasValue)
-                    _hostGun.SetPlayerTagsOverride(player.TeamPlayerId, _plannedHpOverrides[i]);
-
-                if (i < _plannedShieldsOverrides.Count && !player.ShieldsOverride.HasValue && _plannedShieldsOverrides[i].HasValue)
-                    _hostGun.SetPlayerShieldsOverride(player.TeamPlayerId, _plannedShieldsOverrides[i]);
-
-                if (i < _plannedReloadsOverrides.Count && !player.ReloadsOverride.HasValue && _plannedReloadsOverrides[i].HasValue)
-                    _hostGun.SetPlayerReloadsOverride(player.TeamPlayerId, _plannedReloadsOverrides[i]);
-
-                if (i < _plannedAutoReloadOverrides.Count && !player.AutoReloadOverride.HasValue && _plannedAutoReloadOverrides[i].HasValue)
-                    _hostGun.SetPlayerAutoReloadOverride(player.TeamPlayerId, _plannedAutoReloadOverrides[i]);
-
-                if (i < _plannedFullAutoOverrides.Count && !player.FullAutoOverride.HasValue && _plannedFullAutoOverrides[i].HasValue)
-                    _hostGun.SetPlayerFullAutoOverride(player.TeamPlayerId, _plannedFullAutoOverrides[i]);
-
-                if (i < _plannedStartingAmmoOverrides.Count && !player.StartingAmmoOverride.HasValue && _plannedStartingAmmoOverrides[i].HasValue)
-                    _hostGun.SetPlayerStartingAmmoOverride(player.TeamPlayerId, _plannedStartingAmmoOverrides[i]);
-
-                if (i < _plannedSleepTimeoutOverrides.Count && !player.SleepTimeoutOverride.HasValue && _plannedSleepTimeoutOverrides[i].HasValue)
-                    _hostGun.SetPlayerSleepTimeoutOverride(player.TeamPlayerId, _plannedSleepTimeoutOverrides[i]);
-            }
-
-            if (joinedPlayers.Count > _lastNamedPlayerCount)
-            {
-                var newest = joinedPlayers.Last();
-                var newestName = joinedPlayers.Count <= _plannedNames.Count
-                    ? _plannedNames[joinedPlayers.Count - 1]
-                    : newest.DisplayName;
-
-                AppendLog("Guided Join: connected " + newestName + " on " +
-                          newest.TeamPlayerId.ToString(_hostGun.GameDefinition.IsTeamGame) + ".");
-
-                _lastNamedPlayerCount = joinedPlayers.Count;
-            }
-
-            RefreshPlayersView();
-            UpdateGuidedJoinLabel();
-        }
-
         private void UpdateGuidedJoinLabel()
         {
             if (_hostGun == null)
@@ -892,10 +833,10 @@ namespace LazerTagServerApp
                 return;
             }
 
-            var currentCount = _hostGun.Players.Count();
-            if (currentCount < _plannedNames.Count)
+            var nextSlot = _hostGun.NextPlannedSlotIndex;
+            if (nextSlot < _plannedNames.Count)
             {
-                var nextName = GetPlannedName(currentCount);
+                var nextName = _plannedNames[nextSlot];
                 _guidedJoinLabel.Text = "Guided Join: waiting for " + nextName + " to connect next.";
             }
             else if (_plannedNames.Count > 0)
@@ -1418,7 +1359,6 @@ namespace LazerTagServerApp
                 CaptureFullAutoOverridesFromGrid();
                 CaptureStartingAmmoOverridesFromGrid();
                 CaptureSleepTimeoutOverridesFromGrid();
-                _lastNamedPlayerCount = 0;
                 UpdateGuidedJoinLabel();
 
                 // Auto-save previous log then clear for this game
@@ -1462,10 +1402,11 @@ namespace LazerTagServerApp
                 // Close any pre-connect test connection before HostGun opens its own
                 DisconnectPreConnect();
 
-                _hostGun = new HostGun(port);
+                _hostGun = new HostGun(port, RecordDiagnostic);
                 _hostGun.PlayerListChanged   += HostGun_PlayerListChanged;
                 _hostGun.HostingStateChanged += HostGun_HostingStateChanged;
                 _hostGun.Protocol.IoError    += Protocol_IoError;
+                _hostGun.SetPlannedPlayerNames(_plannedNames);
                 _hostGun.SetPlannedTeamPreferences(_plannedTeamPreferences);
                 _hostGun.SetPlannedTagsOverrides(_plannedHpOverrides);
                 _hostGun.SetPlannedShieldsOverrides(_plannedShieldsOverrides);
@@ -1486,7 +1427,7 @@ namespace LazerTagServerApp
                 UpdateGuidedJoinLabel();
 
                 // Open fullscreen game window — lobby, countdown, playing, scores
-                var gameWindow = new GameWindow(_hostGun, _plannedNames.ToList());
+                var gameWindow = new GameWindow(_hostGun, _plannedNames.ToList(), _plannedTeamPreferences.ToList());
                 gameWindow.FormClosed += (ws, we) =>
                 {
                     // When game window closes (user pressed Close on scores),
@@ -1509,6 +1450,7 @@ namespace LazerTagServerApp
             definition.GameType = gameType;
             definition.GameId = new RandomId();
             definition.GameTimeMinutes = Convert.ToInt32(_minutesBox.Value);
+            definition.PlannedPlayerCount = _plannedNames.Count;
             definition.Tags = Convert.ToInt32(_globalTagsBox.Value);
             definition.Shields = Convert.ToInt32(_globalShieldsBox.Value);
             var reloadsVal = Convert.ToInt32(_globalReloadsBox.Value);
@@ -1525,7 +1467,10 @@ namespace LazerTagServerApp
             definition.SleepTimeoutMinutes = Convert.ToInt32(_globalSleepTimeoutBox.Value); // 0 = disabled
             definition.ResendCountdownTimeSeconds = 10;
             definition.UseLtarEnhancedProtocol = _ltarDisableIffCheck.Checked || _ltarDisableHitRegisterCheck.Checked
-                || _autoReloadCheck.Checked || _fullAutoCheck.Checked;
+                || _autoReloadCheck.Checked || _fullAutoCheck.Checked
+                || definition.Tags > BinaryCodedDecimal.MaxDecimalValue || definition.Shields > BinaryCodedDecimal.MaxDecimalValue
+                || _plannedHpOverrides.Any(hp => hp > BinaryCodedDecimal.MaxDecimalValue)
+                || _plannedShieldsOverrides.Any(shields => shields > BinaryCodedDecimal.MaxDecimalValue);
             definition.DisableLtarIffProximityBeacons = _ltarDisableIffCheck.Checked;
             definition.DisableLtarTagReceivedBeacons = _ltarDisableHitRegisterCheck.Checked;
             // Enhanced LTAR options control beacon behavior themselves; do not force standard beacons on.
@@ -1541,9 +1486,10 @@ namespace LazerTagServerApp
                 return;
             }
 
-            if (_plannedNames.Count > 0 && _hostGun.Players.Count() < _plannedNames.Count)
+            var nextSlot = _hostGun.NextPlannedSlotIndex;
+            if (nextSlot < _plannedNames.Count)
             {
-                AppendLog("Countdown not started yet. Still waiting for " + GetPlannedName(_hostGun.Players.Count()) + " to connect.");
+                AppendLog("Countdown not started yet. Still waiting for " + _plannedNames[nextSlot] + " to connect.");
                 return;
             }
 
@@ -1610,7 +1556,7 @@ namespace LazerTagServerApp
             // Connect on a background thread so the UI stays responsive during the 3s timeout
             System.Threading.ThreadPool.QueueUserWorkItem(_ =>
             {
-                var serial = new LazerTagSerial();
+                var serial = new LazerTagSerial(RecordDiagnostic);
                 serial.IoError += PreConnectSerial_IoError;
                 bool ok = serial.Connect(port);
 
@@ -1683,7 +1629,6 @@ namespace LazerTagServerApp
                 return;
             }
 
-            ApplyGuidedNames();
             RefreshPlayersView();
             UpdateTelemetry();
         }
@@ -1723,10 +1668,49 @@ namespace LazerTagServerApp
                 return;
             }
 
+            if (e.State == HostGun.HostingStates.GameOver) _telemetryGamesCompletedCount++;
             UpdateStatus();
             RefreshPlayersView();
             UpdateTelemetry();
             AppendLog("State changed: " + e.PreviousState + " -> " + e.State);
+        }
+
+        private void RecordDiagnostic(HostDiagnostic diagnostic)
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<HostDiagnostic>(RecordDiagnostic), diagnostic);
+                return;
+            }
+
+            switch (diagnostic)
+            {
+                case HostDiagnostic.RelayConnectAttempt:
+                    _telemetryRelayConnectAttempts++;
+                    break;
+                case HostDiagnostic.RelayConnected:
+                    _telemetryRelayConnectedCount++;
+                    SetRelayStatus(true);
+                    break;
+                case HostDiagnostic.RelayConnectTimeout:
+                case HostDiagnostic.RelayHandshakeTimeout:
+                case HostDiagnostic.RelayConnectionRefused:
+                case HostDiagnostic.RelayHandshakeFailed:
+                case HostDiagnostic.RelayConnectFailed:
+                    _telemetryRelayConnectFailureCount++;
+                    if (diagnostic == HostDiagnostic.RelayConnectTimeout || diagnostic == HostDiagnostic.RelayHandshakeTimeout)
+                        _telemetryRelayTimeoutCount++;
+                    SetRelayStatus(false);
+                    break;
+                case HostDiagnostic.UnexpectedPacket:
+                    _telemetryUnexpectedPacketCount++;
+                    break;
+                case HostDiagnostic.StateTimeout:
+                    _telemetryStateTimeoutCount++;
+                    break;
+            }
+            UpdateTelemetry();
         }
 
         private void Log_EntryAdded(object sender, Log.EntryAddedEventArgs e)
@@ -1737,39 +1721,6 @@ namespace LazerTagServerApp
                 BeginInvoke(new Action<object, Log.EntryAddedEventArgs>(Log_EntryAdded), sender, e);
                 return;
             }
-
-            // Use log messages to drive the relay connection indicator — avoids adding
-            // a new event to LazerTagSerial for a purely UI concern.
-            if (e.Entry.Message.StartsWith("Connecting to TCP relay"))
-                _telemetryRelayConnectAttempts++;
-            else if (e.Entry.Message.StartsWith("TCP relay connected"))
-            {
-                _telemetryRelayConnectedCount++;
-                SetRelayStatus(true);
-            }
-            else if (e.Entry.Message.StartsWith("TCP connection timed out"))
-            {
-                _telemetryRelayTimeoutCount++;
-                SetRelayStatus(false);
-            }
-            else if (e.Entry.Message.StartsWith("Explicit state machine: packet kind"))
-            {
-                _telemetryUnexpectedPacketCount++;
-            }
-            else if (e.Entry.Message.StartsWith("Explicit state machine timeout"))
-            {
-                _telemetryStateTimeoutCount++;
-            }
-            else if (e.Entry.Message.StartsWith("Debriefing completed"))
-            {
-                _telemetryGamesCompletedCount++;
-            }
-            else if (e.Entry.Message.StartsWith("Connect() failed"))
-            {
-                _telemetryRelayConnectFailureCount++;
-            }
-
-            UpdateTelemetry();
             AppendLog(string.Format("[{0:HH:mm:ss}] {1}: {2}", e.Entry.Time, e.Entry.Severity, e.Entry.Message));
         }
 
@@ -1859,6 +1810,11 @@ namespace LazerTagServerApp
 
         private void UpdateStatus()
         {
+            var state = _hostGun?.HostingState ?? HostGun.HostingStates.Idle;
+            _endGameButton.Enabled = state != HostGun.HostingStates.Idle
+                && state != HostGun.HostingStates.Summary && state != HostGun.HostingStates.GameOver;
+            _nextButton.Enabled = state == HostGun.HostingStates.Adding || state == HostGun.HostingStates.Playing;
+            _finishDebriefButton.Visible = state == HostGun.HostingStates.Summary && !_hostGun.AllPlayersDebriefed;
             if (_hostGun == null)
             {
                 _statusLabel.Text = "Idle";

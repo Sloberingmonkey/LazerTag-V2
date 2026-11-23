@@ -1,7 +1,7 @@
 # LTAR Arena System - Production Summary
 
-Updated: July 13, 2026  
-Application version: 1.0.1
+Updated: September 20, 2026  
+Application version: 2.0.0-rc.3
 
 ## System purpose
 
@@ -37,7 +37,7 @@ retained for diagnostics but cannot roll back an otherwise operational radio.
 
 ## Application architecture
 
-- .NET 8 ASP.NET Core server, self-contained `linux-arm64` release.
+- .NET 10 ASP.NET Core server, self-contained `linux-arm64` release.
 - SignalR publishes state/telemetry to TV and console; operational logs are in
   an authenticated operator group.
 - A single lifecycle gate serializes relay reconnect, start, countdown, end,
@@ -51,10 +51,18 @@ retained for diagnostics but cannot roll back an otherwise operational radio.
 
 ## Game integrity controls
 
-- Supported public modes: custom solo, custom 2/3 team, respawn 2/3 team, and
-  survival 2 team.
+- Supported public modes: custom solo/2-team/3-team, Hide & Seek, Hunt the Prey,
+  Kings 2/3 team, Own the Zone solo/2-team/3-team, Respawn solo/2-team/3-team,
+  and Survival solo/2-team/3-team.
 - Minimum roster is 2. Protocol capacity is 16 for two-team games and 24 for
   three-team/solo games.
+- During active play the Pi does not claim live tag/score telemetry that LTARs
+  only deliver at debrief; the public TV instead shows timer, roster, objective,
+  role-cycle, and zone state, then switches to authoritative results afterward.
+- Hide & Seek and Hunt the Prey enforce their 2-minute game-length steps. Kings
+  stays on standard hosting to preserve the original King/IFF behavior.
+- Enhanced Respawn announces neutralize + supply-zone revive semantics so the
+  relay's IR zone can return neutralized players to play.
 - Planned settings are applied in stable slot/join order.
 - Countdown is rejected until the exact planned roster is connected and all
   taggers are confirmed.

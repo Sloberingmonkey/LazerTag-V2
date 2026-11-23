@@ -55,7 +55,7 @@ public sealed class HistoryController : ControllerBase
     private static string CreateCsv(CompletedGameRecord game)
     {
         var csv = new StringBuilder();
-        csv.AppendLine("Game ID,Game type,Started UTC,Ended UTC,Ended early,Forced,All debriefed,Results finalized,Player ID,Name,Team,Slot,Tagger ID,Rank,Score,Hits scored,Hits taken,Debrief complete");
+        csv.AppendLine("Game ID,Game type,Started UTC,Ended UTC,Ended early,Forced,All debriefed,Results finalized,Partial results,Player ID,Name,Team,Slot,Tagger ID,Rank,Score,Hits scored,Hits taken,Debrief complete");
 
         foreach (var player in game.Players.OrderBy(player => player.Team).ThenBy(player => player.Slot))
         {
@@ -68,13 +68,14 @@ public sealed class HistoryController : ControllerBase
                 game.Forced,
                 game.AllPlayersDebriefed,
                 game.ResultsFinalized,
+                game.PartialResults,
                 player.Id,
                 ProtectSpreadsheetCell(player.Name),
                 player.Team,
                 player.Slot,
                 player.TaggerId,
-                game.ResultsFinalized ? player.Rank : null,
-                game.ResultsFinalized ? player.Score : null,
+                game.ResultsFinalized || game.PartialResults ? player.Rank : null,
+                game.ResultsFinalized || game.PartialResults ? player.Score : null,
                 player.HitsScored,
                 player.HitsTaken,
                 player.DebriefComplete);

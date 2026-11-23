@@ -9,6 +9,8 @@ namespace LazerTagHostLibrary
 {
     public class HostGun
     {
+        private readonly object _stateSync = new object();
+
 	    private class JoinState
 	    {
 		    public UInt16 GameId;
@@ -17,6 +19,7 @@ namespace LazerTagHostLibrary
 		    public bool Failed;
 		    public int AssignPlayerFailSendCount;
 		    public DateTime LastAssignPlayerFailSendTime;
+            public bool PreservePlayerOnFailure;
 	    };
 
         public enum HostingStates
@@ -79,7 +82,8 @@ namespace LazerTagHostLibrary
 	    public HostingStates HostingState { get; private set; }
 
 
-		private readonly HostStateMachine _explicitStateMachine = new HostStateMachine();
+		private readonly HostStateMachine _explicitStateMachine;
+		private readonly MatchClock _clock;
 		private HostSessionState _lastExplicitPacketCheckState = HostSessionState.Idle;
 
         private readonly Dictionary<UInt16, JoinState> _joinStates = new Dictionary<ushort, JoinState>();
@@ -92,9 +96,7 @@ namespace LazerTagHostLibrary
 
 	    private DateTime _resendCountdownPlayingStateChangeTimeout;
 
-		// Per-slot HP overrides set before hosting starts (index = join order, 0-based).
-		// The announcement broadcast during Adding state uses this to send each
-		// upcoming player's HP before they join, so their tagger picks it up.
+		private readonly List<string> _plannedNames = new List<string>();
 		private readonly List<int?> _plannedTeamPreferences = new List<int?>();
 
 		// Per-slot HP overrides set before hosting starts (index = join order, 0-based).
@@ -120,10 +122,19 @@ namespace LazerTagHostLibrary
 		// Per-slot sleep timeout overrides (minutes, 0 = disabled).
 		private readonly List<int?> _plannedSleepTimeoutOverrides = new List<int?>();
 
-		public HostGun(string portName)
+		private readonly Action<HostDiagnostic> _reportDiagnostic;
+
+		public HostGun(string portName) : this(portName, null) { }
+
+		public HostGun(string portName, Action<HostDiagnostic> reportDiagnostic) : this(portName, reportDiagnostic, MatchClock.Start()) { }
+
+		public HostGun(string portName, Action<HostDiagnostic> reportDiagnostic, MatchClock clock)
 		{
+			_clock = clock;
+			_explicitStateMachine = new HostStateMachine(null, clock);
+			_reportDiagnostic = reportDiagnostic;
 			HostingState = HostingStates.Idle;
-			Protocol = new LazerTagProtocol(this, portName);
+			Protocol = new LazerTagProtocol(this, portName, reportDiagnostic);
 			ForceExplicitState(HostSessionState.Idle, "constructor");
 		}
 
@@ -132,10 +143,34 @@ namespace LazerTagHostLibrary
 			get { return _explicitStateMachine.CurrentState; }
 		}
 
+        /// <summary>
+        /// Executes a read or mutation while holding the host's state lock. This lets the web
+        /// layer build a consistent snapshot without racing packets arriving on the relay thread.
+        /// </summary>
+        public T WithStateLock<T>(Func<T> action)
+        {
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            lock (_stateSync) return action();
+        }
+
+        public void WithStateLock(Action action)
+        {
+            if (action == null) throw new ArgumentNullException(nameof(action));
+            lock (_stateSync) action();
+        }
+
 		public void SetGameStartCountdownTime(int countdownTimeSeconds)
 		{
+		    lock (_stateSync)
+		    {
+		        SetGameStartCountdownTimeCore(countdownTimeSeconds);
+		    }
+		}
+
+private void SetGameStartCountdownTimeCore(int countdownTimeSeconds)
+		{
             _gameDefinition.CountdownTimeSeconds = countdownTimeSeconds;
-        }
+        		}
 
 	    private bool AssignTeamAndPlayer(int requestedTeam, int preferredTeam, Player newPlayer)
 	    {
@@ -259,6 +294,14 @@ namespace LazerTagHostLibrary
         /// </summary>
         public int CountEffectiveHitsScored(Player player)
         {
+            lock (_stateSync)
+            {
+                return CountEffectiveHitsScoredCore(player);
+            }
+        }
+
+private int CountEffectiveHitsScoredCore(Player player)
+        {
             if (player == null) return 0;
 
             var hitsScored = 0;
@@ -268,18 +311,60 @@ namespace LazerTagHostLibrary
                 if (_gameDefinition.IsTeamGame &&
                     player.TeamPlayerId.TeamNumber == target.TeamPlayerId.TeamNumber) continue;
 
-                var targetIndex = target.TeamPlayerId.PlayerNumber - 1;
-                if (targetIndex < 0 || targetIndex >= player.TaggedPlayerCounts.Length) continue;
-
-                var rawHits = Math.Max(0, player.TaggedPlayerCounts[targetIndex]);
-                var targetHp = target.TagsOverride.HasValue
-                    ? target.TagsOverride.Value
-                    : _gameDefinition.Tags;
-
-                hitsScored += Math.Min(rawHits, Math.Max(0, targetHp));
+                hitsScored += EffectiveHitsOnCore(player, target);
             }
 
             return hitsScored;
+        }
+
+        /// <summary>
+        /// Effective tags <paramref name="attacker"/> landed on <paramref name="target"/>.
+        /// </summary>
+        private int EffectiveHitsOn(Player attacker, Player target)
+        {
+            lock (_stateSync)
+            {
+                return EffectiveHitsOnCore(attacker, target);
+            }
+        }
+
+        private int EffectiveHitsOnCore(Player attacker, Player target)
+        {
+            if (attacker == null || target == null || ReferenceEquals(attacker, target)) return 0;
+            // A dropped target's reports are incomplete, so hits on it are not scored.
+            if (target.Dropped) return 0;
+
+            var attackerIndex = attacker.TeamPlayerId.PlayerNumber - 1;
+            var targetIndex = target.TeamPlayerId.PlayerNumber - 1;
+            if (targetIndex < 0 || targetIndex >= attacker.TaggedPlayerCounts.Length) return 0;
+            if (attackerIndex < 0 || attackerIndex >= target.TaggedByCountSuspect.Length) return 0;
+
+            var targetHp = target.TagsOverride.HasValue
+                ? target.TagsOverride.Value
+                : _gameDefinition.Tags;
+            var hits = Math.Min(Math.Max(0, attacker.TaggedPlayerCounts[targetIndex]), Math.Max(0, targetHp));
+
+            if (!target.TaggedByCountSuspect[attackerIndex] || !target.TagSummaryReceived) return hits;
+
+            // A non-canonical count byte (field hardware has sent 0x8A, which decodes to 90)
+            // can't be trusted on its own. The target's own tag summary says how many tags it
+            // took in total, so the suspect count gets at most what the target's well-formed
+            // reports haven't already accounted for. Suspect counts share that remainder in
+            // player-number order so the same tag is never credited twice.
+            var remaining = Math.Max(0, target.TagsTaken);
+            for (var i = 0; i < target.TaggedByPlayerCounts.Length && remaining > 0; i++)
+            {
+                if (i == attackerIndex || target.TaggedByCountSuspect[i]) continue;
+                remaining -= Math.Min(Math.Max(0, target.TaggedByPlayerCounts[i]), Math.Max(0, targetHp));
+            }
+
+            for (var i = 0; i < attackerIndex && remaining > 0; i++)
+            {
+                if (!target.TaggedByCountSuspect[i]) continue;
+                remaining -= Math.Min(Math.Max(0, target.TaggedByPlayerCounts[i]), Math.Max(0, targetHp));
+            }
+
+            return Math.Min(hits, Math.Max(0, remaining));
         }
 
         private void PrintScoreReport()
@@ -514,6 +599,7 @@ namespace LazerTagHostLibrary
 
 			if (!_explicitStateMachine.IsPacketAccepted(packetKind))
 			{
+				_reportDiagnostic?.Invoke(HostDiagnostic.UnexpectedPacket);
 				Log.Add(Log.Severity.Debug,
 					"Explicit state machine: packet kind {0} is not expected in {1} (packet 0x{2:X2}).",
 					packetKind, _explicitStateMachine.CurrentState, (byte)packetType);
@@ -521,6 +607,14 @@ namespace LazerTagHostLibrary
 		}
 
 	    public bool ProcessPacket(Packet packet)
+        {
+            lock (_stateSync)
+            {
+                return ProcessPacketCore(packet);
+            }
+        }
+
+	    private bool ProcessPacketCore(Packet packet)
 	    {
 		    var packetType = (PacketType) packet.PacketTypeSignature.Data;
 			CheckPacketAgainstExplicitState(packetType);
@@ -666,21 +760,59 @@ namespace LazerTagHostLibrary
 
 			foreach (var checkPlayer in Players)
 			{
-				if (checkPlayer.TaggerId == taggerId && !checkPlayer.Confirmed)
+				if (checkPlayer.TaggerId == taggerId)
 				{
 					player = checkPlayer;
 					break;
 				}
 			}
 
+            // Treat repeated join requests from an already-confirmed physical tagger as
+            // idempotent. A reset/retransmission must never allocate a second roster slot.
+            if (player != null && player.Confirmed)
+            {
+                Log.Add(Log.Severity.Information,
+                    "Repeated join request from confirmed tagger 0x{0:X2}; reusing player {1}.",
+                    taggerId, player.TeamPlayerId.ToString(_gameDefinition.IsTeamGame));
+
+                _joinStates[taggerId] = new JoinState
+                {
+                    GameId = gameId,
+                    Player = player,
+                    AssignPlayerSendTime = _clock.Now,
+                    PreservePlayerOnFailure = true,
+                };
+                SendPlayerAssignment(player.TeamPlayerId);
+                ChangeState(HostingStates.AcknowledgePlayerAssignment);
+                return true;
+            }
+
             if (player == null)
             {
-                player = new Player(this, (byte)taggerId);
+                if (GameDefinition.PlannedPlayerCount.HasValue && Players.Count >= GameDefinition.PlannedPlayerCount.Value)
+                {
+                    var refusal = GameDefinition.UseLtarEnhancedProtocol
+                        ? PacketPacker.AssignPlayerFailedEnhanced(gameId, taggerId)
+                        : PacketPacker.AssignPlayerFailed(gameId, taggerId);
+                    Protocol.TransmitPacket(refusal);
+                    Log.Add(Log.Severity.Information, "Declined tagger 0x{0:X2}. All planned roster slots are occupied.", taggerId);
+                    return false;
+                }
 
-                var joinIndex = Players.Count;
-                var preferredTeam = 0;
-                if (joinIndex >= 0 && joinIndex < _plannedTeamPreferences.Count && _plannedTeamPreferences[joinIndex].HasValue)
-                    preferredTeam = _plannedTeamPreferences[joinIndex].Value;
+                var slot = NextPlannedSlotIndex;
+                player = new Player(this, (byte)taggerId)
+                {
+                    PlannedSlotIndex = slot,
+                    Name = _plannedNames.ElementAtOrDefault(slot),
+                    TagsOverride = _plannedTagsOverrides.ElementAtOrDefault(slot),
+                    ShieldsOverride = _plannedShieldsOverrides.ElementAtOrDefault(slot),
+                    ReloadsOverride = _plannedReloadsOverrides.ElementAtOrDefault(slot),
+                    AutoReloadOverride = _plannedAutoReloadOverrides.ElementAtOrDefault(slot),
+                    FullAutoOverride = _plannedFullAutoOverrides.ElementAtOrDefault(slot),
+                    StartingAmmoOverride = _plannedStartingAmmoOverrides.ElementAtOrDefault(slot),
+                    SleepTimeoutOverride = _plannedSleepTimeoutOverrides.ElementAtOrDefault(slot)
+                };
+                var preferredTeam = _plannedTeamPreferences.ElementAtOrDefault(slot) ?? 0;
 
                 if (!AssignTeamAndPlayer(requestedTeam, preferredTeam, player)) return false;
 
@@ -691,7 +823,7 @@ namespace LazerTagHostLibrary
 			{
 				GameId = gameId,
 				Player = player,
-				AssignPlayerSendTime = DateTime.Now
+				AssignPlayerSendTime = _clock.Now
 			};
 			_joinStates.Remove(taggerId);
 			_joinStates.Add(taggerId, joinState);
@@ -727,7 +859,7 @@ namespace LazerTagHostLibrary
 			_joinStates.Remove(taggerId);
 
 			Log.Add(Log.Severity.Information, "Confirmed player {0} for game 0x{1:X2}.",
-			                   player.TeamPlayerId.ToString(_gameDefinition.IsTeamGame), gameId);
+			                   player.NameAndNumber, gameId);
 
 			if (_gameDefinition.UseLtarEnhancedProtocol)
 			{
@@ -769,8 +901,17 @@ namespace LazerTagHostLibrary
 			if (player.LtarDebriefReleased) return;
 			if (!player.AllTagReportsReceived()) return;
 
-			SendLtarRelease(player, "debrief");
-			player.LtarDebriefReleased = true;
+            if (player.DebriefReleaseReceipt != null)
+            {
+                if (!player.DebriefReleaseReceipt.IsCompleted) return;
+                player.LtarDebriefReleased = player.DebriefReleaseReceipt.Result;
+                player.DebriefReleaseReceipt = null;
+                if (player.LtarDebriefReleased) return;
+            }
+            if (_clock.Now < player.NextDebriefReleaseAttempt) return;
+            player.NextDebriefReleaseAttempt = _clock.Now.AddSeconds(1);
+            var packet = PacketPacker.AssignPlayerSuccessEnhanced(_gameDefinition.GameId, player.TeamPlayerId);
+            player.DebriefReleaseReceipt = Protocol.TransmitConfirmedAsync(packet);
 		}
 
 		private void SendGameEndSignal()
@@ -949,6 +1090,7 @@ namespace LazerTagHostLibrary
 
 			// Decode the complete payload before changing any score or receipt state.
 			var decodedTagCounts = new int[8];
+			var decodedCountSuspect = new bool[8];
 			var packetIndex = 3;
 			for (var taggedByTeamPlayerNumber = 1; taggedByTeamPlayerNumber <= 8; taggedByTeamPlayerNumber++)
 			{
@@ -968,8 +1110,9 @@ namespace LazerTagHostLibrary
 				if (!IsCanonicalTeamTagCountBcd(encodedTagCount))
 				{
 					Log.Add(Log.Severity.Warning,
-						"Accepted non-canonical tag count 0x{0:X} for player {1}, team {2}, team player {3} using legacy-compatible decoding ({4}).",
+						"Accepted non-canonical tag count 0x{0:X} for player {1}, team {2}, team player {3} using legacy-compatible decoding ({4}). It will be limited to the player's reported hits taken.",
 						encodedTagCount, player.TeamPlayerId, taggedByTeamNumber, taggedByTeamPlayerNumber, tagsTaken);
+					decodedCountSuspect[taggedByTeamPlayerNumber - 1] = true;
 				}
 
 				decodedTagCounts[taggedByTeamPlayerNumber - 1] = tagsTaken;
@@ -984,6 +1127,8 @@ namespace LazerTagHostLibrary
 				var taggedByTeamPlayerId = new TeamPlayerId(taggedByTeamNumber, taggedByTeamPlayerNumber);
 				var tagsTaken = decodedTagCounts[taggedByTeamPlayerNumber - 1];
 				player.TaggedByPlayerCounts[taggedByTeamPlayerId.PlayerNumber - 1] = tagsTaken;
+				player.TaggedByCountSuspect[taggedByTeamPlayerId.PlayerNumber - 1] =
+					decodedCountSuspect[taggedByTeamPlayerNumber - 1];
 
 				var taggedByPlayer = Players.Player(taggedByTeamPlayerId);
 				if (taggedByPlayer != null)
@@ -1001,10 +1146,11 @@ namespace LazerTagHostLibrary
 			return true;
 		}
 
+        // Scores use every report that arrived. A dropped tagger's hits on other players
+        // come from those players' reports and still count; hits on the dropped tagger
+        // were in its own missing reports, so EffectiveHitsOnCore scores none of them.
         private void CalculateScores()
         {
-	        RemoveDroppedPlayerTags();
-
             switch (_gameDefinition.GameType)
 			{
 				case GameType.OwnTheZone:
@@ -1048,24 +1194,6 @@ namespace LazerTagHostLibrary
 					break;
 			}
         }
-
-		private void RemoveDroppedPlayerTags()
-	    {
-		    foreach (var droppedPlayer in Players.Where(droppedPlayer => droppedPlayer.Dropped))
-		    {
-			    droppedPlayer.TagsTaken = 0;
-
-			    foreach (var otherPlayer in Players)
-			    {
-				    droppedPlayer.TaggedPlayerCounts[otherPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-				    droppedPlayer.TaggedByPlayerCounts[otherPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-
-				    otherPlayer.TagsTaken -= otherPlayer.TaggedByPlayerCounts[droppedPlayer.TeamPlayerId.PlayerNumber - 1];
-				    otherPlayer.TaggedPlayerCounts[droppedPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-				    otherPlayer.TaggedByPlayerCounts[droppedPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-			    }
-		    }
-	    }
 
 	    private void CalculateScoresOwnTheZone()
 		{
@@ -1167,12 +1295,12 @@ namespace LazerTagHostLibrary
 					if (player.TeamPlayerId.TeamNumber == teamNumber)
 					{
 						// Players lose 4 point for each tag they land on their own team's king
-						player.Score -= 4*player.TaggedPlayerCounts[teamKing.TeamPlayerId.PlayerNumber - 1];
+						player.Score -= 4*EffectiveHitsOn(player, teamKing);
 					}
 					else
 					{
 						// Players receive 1 point for each tag they land on other teams' kings
-						player.Score += player.TaggedPlayerCounts[teamKing.TeamPlayerId.PlayerNumber - 1];
+						player.Score += EffectiveHitsOn(player, teamKing);
 					}
 				}
 			}
@@ -1200,7 +1328,7 @@ namespace LazerTagHostLibrary
 				for (var teamNumber = 1; teamNumber <= teamCount; teamNumber++)
 					for (var playerNumber = 1; playerNumber <= 8; playerNumber++)
 						if (player.TeamPlayerId.TeamNumber != teamNumber)
-							hitsScored += player.TaggedPlayerCounts[new TeamPlayerId(teamNumber, playerNumber).PlayerNumber - 1];
+							hitsScored += EffectiveHitsOn(player, Players.Player(new TeamPlayerId(teamNumber, playerNumber)));
 
 				player.Score = hitsScored;
 				teamScoreTotals[player.TeamPlayerId.TeamNumber - 1] += player.Score;
@@ -1223,12 +1351,7 @@ namespace LazerTagHostLibrary
 		{
 			foreach (var player in _players)
 			{
-				var hitsScored = 0;
-				for (var playerNumber = 1; playerNumber <= TeamPlayerId.MaximumPlayerNumber; playerNumber++)
-					hitsScored += player.TaggedPlayerCounts[playerNumber - 1];
-
-				// 1 point per hit scored + 10 points per full minute survived
-				player.Score = hitsScored + 10 * (int)player.SurviveTime.TotalMinutes;
+				player.Score = SurvivalScore(player);
 			}
 
 			Teams.CalculateRanks();
@@ -1243,14 +1366,7 @@ namespace LazerTagHostLibrary
 
 			foreach (var player in _players)
 			{
-				var hitsScored = 0;
-				for (var teamNumber = 1; teamNumber <= teamCount; teamNumber++)
-					for (var playerNumber = 1; playerNumber <= 8; playerNumber++)
-						if (player.TeamPlayerId.TeamNumber != teamNumber)
-							hitsScored += player.TaggedPlayerCounts[new TeamPlayerId(teamNumber, playerNumber).PlayerNumber - 1];
-
-				// 1 point per enemy hit scored + 10 points per full minute survived
-				player.Score = hitsScored + 10 * (int)player.SurviveTime.TotalMinutes;
+				player.Score = SurvivalScore(player);
 
 				if (player.Survived)
 				{
@@ -1272,6 +1388,11 @@ namespace LazerTagHostLibrary
 			Players.CalculateRanks();
 		}
 
+		private int SurvivalScore(Player player)
+		{
+			return CountEffectiveHitsScored(player) + 10 * (int)player.SurviveTime.TotalMinutes;
+		}
+
 		private void CalculateScoresHuntTheTagMasterTwoTeams()
 		{
 			var teamCount = GameDefinition.TeamCount;
@@ -1287,17 +1408,15 @@ namespace LazerTagHostLibrary
 				{
 					for (var teamPlayerNumber = 1; teamPlayerNumber <= 8; teamPlayerNumber++)
 					{
-						var playerNumber = new TeamPlayerId(teamNumber, teamPlayerNumber).PlayerNumber;
-
 						if (player.TeamPlayerId.TeamNumber == 1) // Tag Master scores hits on anyone
 						{
 							if (teamNumber != 1)
-								score += player.TaggedPlayerCounts[playerNumber - 1];
+								score += EffectiveHitsOn(player, Players.Player(new TeamPlayerId(teamNumber, teamPlayerNumber)));
 						}
 						else // Hunters score hits on the Tag Master only
 						{
 							if (teamNumber == 1)
-								score += player.TaggedPlayerCounts[playerNumber - 1];
+								score += EffectiveHitsOn(player, Players.Player(new TeamPlayerId(teamNumber, teamPlayerNumber)));
 						}
 					}
 				}
@@ -1376,14 +1495,14 @@ namespace LazerTagHostLibrary
 					if (previousState != HostingStates.Adding &&
 					    previousState != HostingStates.AcknowledgePlayerAssignment) return false;
 			        Log.Add(Log.Severity.Information, "Starting countdown");
-			        _stateChangeTimeout = DateTime.Now.AddSeconds(_gameDefinition.CountdownTimeSeconds);
+			        _stateChangeTimeout = _clock.Now.AddSeconds(_gameDefinition.CountdownTimeSeconds);
 			        SendLtarReleaseToAllConfirmedPlayers("countdown-start");
 			        break;
 		        case HostingStates.ResendCountdown:
 					if (previousState != HostingStates.Playing) return false;
 					Log.Add(Log.Severity.Information, "Resending countdown");
 			        _resendCountdownPlayingStateChangeTimeout = _stateChangeTimeout;
-			        _stateChangeTimeout = DateTime.Now.AddSeconds(_gameDefinition.ResendCountdownTimeSeconds);
+			        _stateChangeTimeout = _clock.Now.AddSeconds(_gameDefinition.ResendCountdownTimeSeconds);
 			        break;
 		        case HostingStates.Adding:
 					Log.Add(Log.Severity.Information, "Adding players");
@@ -1403,14 +1522,14 @@ namespace LazerTagHostLibrary
 			        break;
 		        case HostingStates.AcknowledgePlayerAssignment:
 			        Log.Add(Log.Severity.Debug, "Waiting for AcknowledgePlayerAssignment packet.");
-			        _stateChangeTimeout = DateTime.Now.AddSeconds(AcknowledgePlayerAssignmentTimeoutSeconds);
+			        _stateChangeTimeout = _clock.Now.AddSeconds(AcknowledgePlayerAssignmentTimeoutSeconds);
 			        break;
 		        case HostingStates.Playing:
 					switch (previousState)
 			        {
 				        case HostingStates.Countdown:
 					        Log.Add(Log.Severity.Information, "Starting Game");
-					        _stateChangeTimeout = DateTime.Now.AddMinutes(_gameDefinition.GameTimeMinutes);
+					        _stateChangeTimeout = _clock.Now.AddMinutes(_gameDefinition.GameTimeMinutes);
 					        break;
 				        case HostingStates.ResendCountdown:
 					        Log.Add(Log.Severity.Information, "Continuing Game");
@@ -1420,6 +1539,8 @@ namespace LazerTagHostLibrary
 			        break;
 			case HostingStates.Summary:
 				Log.Add(Log.Severity.Information, "Debriefing");
+				DebriefForced = false;
+				PartialScores = false;
 				// Debrief is driven by RequestTagReport. AssignPlayerSuccess (0x87) is
 				// an assignment-stage release, not a debrief preamble. The former release
 				// burst followed by another directed release made roster player 2 receive
@@ -1436,7 +1557,7 @@ namespace LazerTagHostLibrary
 	        }
 
 	        HostingState = state;
-			_nextAnnouncement = DateTime.Now;
+			_nextAnnouncement = _clock.Now;
 
 			SyncExplicitStateFromHostingState("ChangeState");
 
@@ -1446,6 +1567,70 @@ namespace LazerTagHostLibrary
         }
 
 		#region Public Interface
+
+        public bool DebriefForced { get; private set; }
+
+        /// <summary>
+        /// True when the operator finished a debrief with missing reports and the scores
+        /// were calculated from the reports that did arrive. Such scores are not final.
+        /// </summary>
+        public bool PartialScores { get; private set; }
+
+        public bool AllPlayersDebriefed
+        {
+            get
+            {
+                lock (_stateSync)
+                    return _players.Count > 0 && _players.All(p => !p.Dropped && p.AllTagReportsReceived());
+            }
+        }
+
+        public bool FinishDebrief()
+        {
+            lock (_stateSync)
+            {
+                if (HostingState != HostingStates.Summary) return false;
+                CompleteDebrief(true);
+                return true;
+            }
+        }
+
+        private void CompleteDebrief(bool requestedByOperator)
+        {
+            var complete = AllPlayersDebriefed;
+            DebriefForced = requestedByOperator && !complete;
+            if (!complete && requestedByOperator)
+            {
+                foreach (var player in _players)
+                    if (!player.AllTagReportsReceived()) DropPlayer(player.TeamPlayerId);
+            }
+            if (complete || requestedByOperator)
+            {
+                CalculateScores();
+                PrintScoreReport();
+                PartialScores = !complete;
+            }
+            ChangeState(HostingStates.GameOver);
+        }
+
+        public int NextPlannedSlotIndex
+        {
+            get
+            {
+                lock (_stateSync)
+                {
+                    var slot = 0;
+                    while (_players.Any(player => player.PlannedSlotIndex == slot)) slot++;
+                    return slot;
+                }
+            }
+        }
+
+        public void SetPlannedPlayerNames(IEnumerable<string> names)
+        {
+            _plannedNames.Clear();
+            _plannedNames.AddRange(names);
+        }
 
         /// <summary>
         /// Sets per-slot preferred team assignments. Index 0 = first player to join, etc.
@@ -1516,15 +1701,31 @@ namespace LazerTagHostLibrary
 
 		public void StartServer(GameDefinition gameDefinition)
 		{
+		    lock (_stateSync)
+		    {
+		        StartServerCore(gameDefinition);
+		    }
+		}
+
+private void StartServerCore(GameDefinition gameDefinition)
+		{
             if (HostingState != HostingStates.Idle) return;
 
 			_gameDefinition = gameDefinition;
 			// GameId is assigned by the caller (MainForm.BuildGameDefinition) - do not overwrite it here.
 
             ChangeState(HostingStates.Adding);
-        }
+        		}
 
         public void EndGame()
+        {
+            lock (_stateSync)
+            {
+                EndGameCore();
+            }
+        }
+
+        private void EndGameCore()
         {
             switch (HostingState)
             {
@@ -1541,72 +1742,81 @@ namespace LazerTagHostLibrary
                     Log.Add(Log.Severity.Information, "Ending live game and moving to summary.");
                     ChangeState(HostingStates.Summary);
                     break;
-
-                case HostingStates.Summary:
-                    Log.Add(Log.Severity.Information, "Forcing summary complete and moving to game over.");
-                    foreach (var player in Players)
-                    {
-                        if (!player.AllTagReportsReceived())
-                            DropPlayer(player.TeamPlayerId);
-                    }
-                    ChangeState(HostingStates.GameOver);
-                    break;
-
-                case HostingStates.GameOver:
-                    Log.Add(Log.Severity.Information, "Game is already in GameOver.");
-                    break;
-
-                case HostingStates.Idle:
-                default:
-                    Log.Add(Log.Severity.Information, "EndGame pressed while already idle.");
-                    break;
             }
         }
 
         public void DelayGame(int seconds)
-		{
-			_stateChangeTimeout = _stateChangeTimeout.AddSeconds(seconds);
+        {
+            lock (_stateSync)
+            {
+                DelayGameCore(seconds);
+            }
         }
 
+private void DelayGameCore(int seconds)
+        {
+			_stateChangeTimeout = _stateChangeTimeout.AddSeconds(seconds);
+                }
+
 	    public void Next()
-		{
+	    {
+	        lock (_stateSync)
+	        {
+	            NextCore();
+	        }
+	    }
+
+        private void NextCore()
+        {
             switch (HostingState)
-			{
-				case HostingStates.Adding:
-					ChangeState(HostingStates.Countdown);
-					break;
-				case HostingStates.Playing:
-					ChangeState(HostingStates.Summary);
-					break;
-				case HostingStates.Summary:
-					foreach (var player in Players)
-					{
-						if (!player.AllTagReportsReceived()) DropPlayer(player.TeamPlayerId);
-					}
-					ChangeState(HostingStates.GameOver);
-					break;
-				case HostingStates.Idle:
-				case HostingStates.AcknowledgePlayerAssignment:
-				case HostingStates.Countdown:
-				case HostingStates.ResendCountdown:
-				case HostingStates.GameOver:
-				default:
-					Log.Add(Log.Severity.Warning, "Next cannot be used while in the {0} hosting state.", HostingState);
-					break;
+            {
+                case HostingStates.Adding:
+                    ChangeState(HostingStates.Countdown);
+                    break;
+                case HostingStates.Playing:
+                    ChangeState(HostingStates.Summary);
+                    break;
+                default:
+                    Log.Add(Log.Severity.Warning, "Next cannot be used while in the {0} hosting state.", HostingState);
+                    break;
             }
         }
 
         public bool StartCountdown()
-		{
-            return ChangeState(HostingStates.Countdown);
+        {
+            lock (_stateSync)
+            {
+                return StartCountdownCore();
+            }
         }
+
+private bool StartCountdownCore()
+        {
+            return ChangeState(HostingStates.Countdown);
+                }
 
 		public void ResendCountdown()
 		{
-			ChangeState(HostingStates.ResendCountdown);
+		    lock (_stateSync)
+		    {
+		        ResendCountdownCore();
+		    }
 		}
 
+private void ResendCountdownCore()
+		{
+			ChangeState(HostingStates.ResendCountdown);
+				}
+
         public string GetGameStateText()
+        {
+            lock (_stateSync)
+            {
+                return GetGameStateTextCore();
+            }
+        }
+
+private string GetGameStateTextCore()
         {
             switch (HostingState)
 			{
@@ -1626,12 +1836,20 @@ namespace LazerTagHostLibrary
 				default:
 					return "Not In a Game";
             }
-        }
+                }
 
 	    public string GetCountdown()
 	    {
+	        lock (_stateSync)
+	        {
+	            return GetCountdownCore();
+	        }
+	    }
+
+private string GetCountdownCore()
+	    {
 			string countdown;
-		    var timeRemaining = (_stateChangeTimeout - DateTime.Now).ToString(@"m\:ss");
+		    var timeRemaining = (_stateChangeTimeout - _clock.Now).ToString(@"m\:ss");
 		    switch (HostingState)
 		    {
 			    case HostingStates.Adding:
@@ -1666,12 +1884,30 @@ namespace LazerTagHostLibrary
 				    break;
 		    }
 		    return countdown;
+        	    }
+
+        /// <summary>Remaining phase time on the same elapsed clock that drives the taggers.</summary>
+        public long PhaseRemainingMilliseconds
+        {
+            get
+            {
+                lock (_stateSync)
+                    return Math.Max(0L, (long)Math.Ceiling((_stateChangeTimeout - _clock.Now).TotalMilliseconds));
+            }
         }
 
         /// <summary>Returns just the mm:ss time remaining for the clock display.</summary>
         public string GetTimeRemaining()
         {
-            var remaining = _stateChangeTimeout - DateTime.Now;
+            lock (_stateSync)
+            {
+                return GetTimeRemainingCore();
+            }
+        }
+
+private string GetTimeRemainingCore()
+        {
+            var remaining = _stateChangeTimeout - _clock.Now;
             if (remaining < TimeSpan.Zero) remaining = TimeSpan.Zero;
             switch (HostingState)
             {
@@ -1682,9 +1918,17 @@ namespace LazerTagHostLibrary
                 default:
                     return "";
             }
-        }
+                }
 
         public bool SetPlayerName(TeamPlayerId teamPlayerId, string name)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerNameCore(teamPlayerId, name);
+            }
+        }
+
+private bool SetPlayerNameCore(TeamPlayerId teamPlayerId, string name)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null)
@@ -1696,7 +1940,7 @@ namespace LazerTagHostLibrary
             player.Name = name;
 
             return true;
-        }
+                }
 
         /// <summary>
         /// Sets a per-player HP override recorded on the Player object after they join.
@@ -1706,16 +1950,32 @@ namespace LazerTagHostLibrary
         /// </summary>
         public bool SetPlayerTagsOverride(TeamPlayerId teamPlayerId, int? tagsOverride)
         {
+            lock (_stateSync)
+            {
+                return SetPlayerTagsOverrideCore(teamPlayerId, tagsOverride);
+            }
+        }
+
+private bool SetPlayerTagsOverrideCore(TeamPlayerId teamPlayerId, int? tagsOverride)
+        {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
             player.TagsOverride = tagsOverride;
             Log.Add(Log.Severity.Information, "Set HP override for {0} to {1}.", player.NameAndNumber,
                 tagsOverride.HasValue ? tagsOverride.Value.ToString() : "global default");
             return true;
-        }
+                }
 
         /// <summary>Sets a per-player shields override (seconds). Null = use global.</summary>
         public bool SetPlayerShieldsOverride(TeamPlayerId teamPlayerId, int? shieldsOverride)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerShieldsOverrideCore(teamPlayerId, shieldsOverride);
+            }
+        }
+
+private bool SetPlayerShieldsOverrideCore(TeamPlayerId teamPlayerId, int? shieldsOverride)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
@@ -1723,10 +1983,18 @@ namespace LazerTagHostLibrary
             Log.Add(Log.Severity.Information, "Set shields override for {0} to {1}.", player.NameAndNumber,
                 shieldsOverride.HasValue ? shieldsOverride.Value.ToString() : "global default");
             return true;
-        }
+                }
 
         /// <summary>Sets a per-player reloads override (number of clips). Null = use global.</summary>
         public bool SetPlayerReloadsOverride(TeamPlayerId teamPlayerId, int? reloadsOverride)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerReloadsOverrideCore(teamPlayerId, reloadsOverride);
+            }
+        }
+
+private bool SetPlayerReloadsOverrideCore(TeamPlayerId teamPlayerId, int? reloadsOverride)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
@@ -1734,42 +2002,82 @@ namespace LazerTagHostLibrary
             Log.Add(Log.Severity.Information, "Set reloads override for {0} to {1}.", player.NameAndNumber,
                 reloadsOverride.HasValue ? reloadsOverride.Value.ToString() : "global default");
             return true;
-        }
+                }
 
         public bool SetPlayerAutoReloadOverride(TeamPlayerId teamPlayerId, bool? autoReload)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerAutoReloadOverrideCore(teamPlayerId, autoReload);
+            }
+        }
+
+private bool SetPlayerAutoReloadOverrideCore(TeamPlayerId teamPlayerId, bool? autoReload)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
             player.AutoReloadOverride = autoReload;
             return true;
-        }
+                }
 
         public bool SetPlayerFullAutoOverride(TeamPlayerId teamPlayerId, bool? fullAuto)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerFullAutoOverrideCore(teamPlayerId, fullAuto);
+            }
+        }
+
+private bool SetPlayerFullAutoOverrideCore(TeamPlayerId teamPlayerId, bool? fullAuto)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
             player.FullAutoOverride = fullAuto;
             return true;
-        }
+                }
 
         public bool SetPlayerStartingAmmoOverride(TeamPlayerId teamPlayerId, int? startingAmmo)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerStartingAmmoOverrideCore(teamPlayerId, startingAmmo);
+            }
+        }
+
+private bool SetPlayerStartingAmmoOverrideCore(TeamPlayerId teamPlayerId, int? startingAmmo)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
             player.StartingAmmoOverride = startingAmmo;
             return true;
-        }
+                }
 
         public bool SetPlayerSleepTimeoutOverride(TeamPlayerId teamPlayerId, int? sleepTimeout)
+        {
+            lock (_stateSync)
+            {
+                return SetPlayerSleepTimeoutOverrideCore(teamPlayerId, sleepTimeout);
+            }
+        }
+
+private bool SetPlayerSleepTimeoutOverrideCore(TeamPlayerId teamPlayerId, int? sleepTimeout)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null) { Log.Add(Log.Severity.Warning, "Player not found."); return false; }
             player.SleepTimeoutOverride = sleepTimeout;
             return true;
-        }
+                }
 
 
         public bool MovePlayerToTeam(TeamPlayerId teamPlayerId, int requestedTeamNumber)
+        {
+            lock (_stateSync)
+            {
+                return MovePlayerToTeamCore(teamPlayerId, requestedTeamNumber);
+            }
+        }
+
+private bool MovePlayerToTeamCore(TeamPlayerId teamPlayerId, int requestedTeamNumber)
         {
             if (!_gameDefinition.IsTeamGame) return false;
             if (requestedTeamNumber < 1 || requestedTeamNumber > _gameDefinition.TeamCount) return false;
@@ -1829,9 +2137,17 @@ namespace LazerTagHostLibrary
 
             OnPlayerListChanged(new PlayerListChangedEventArgs(Players));
             return true;
-        }
+                }
 
         public void DropPlayer(TeamPlayerId teamPlayerId)
+        {
+            lock (_stateSync)
+            {
+                DropPlayerCore(teamPlayerId);
+            }
+        }
+
+private void DropPlayerCore(TeamPlayerId teamPlayerId)
         {
 			var player = Players.Player(teamPlayerId);
             if (player == null)
@@ -1846,8 +2162,7 @@ namespace LazerTagHostLibrary
 				case HostingStates.Adding:
 				case HostingStates.AcknowledgePlayerAssignment:
 				case HostingStates.Countdown:
-					_players.Remove(player.TeamPlayerId);
-					changed = true;
+					changed = RemovePlayerFromRoster(player);
 					break;
 				case HostingStates.Playing:
 				case HostingStates.ResendCountdown:
@@ -1866,13 +2181,27 @@ namespace LazerTagHostLibrary
 			}
 
 	        if (changed) OnPlayerListChanged(new PlayerListChangedEventArgs(Players));
-        }
+                }
 
         public void Update()
         {
+            lock (_stateSync)
+            {
+                UpdateCore();
+            }
+        }
+
+        private void UpdateCore()
+        {
+            if ((HostingState == HostingStates.Summary || HostingState == HostingStates.GameOver) && Protocol.IsConnected)
+            {
+                foreach (var player in Players)
+                    if (player.Confirmed && !player.Dropped) SendLtarDebriefReleaseIfReady(player);
+            }
 			string explicitTimeoutNote;
-			if (_explicitStateMachine.OnTick(DateTime.UtcNow, out explicitTimeoutNote))
+			if (_explicitStateMachine.OnTick(_clock.Now, out explicitTimeoutNote))
 			{
+				_reportDiagnostic?.Invoke(HostDiagnostic.StateTimeout);
 				if (!string.IsNullOrWhiteSpace(explicitTimeoutNote))
 				{
 					Log.Add(Log.Severity.Debug, "Explicit state machine timeout: {0}", explicitTimeoutNote);
@@ -1886,11 +2215,11 @@ namespace LazerTagHostLibrary
 				case HostingStates.Adding:
 					CheckAssignPlayerFailed();
 
-					if (DateTime.Now >= _nextAnnouncement)
+					if (_clock.Now >= _nextAnnouncement)
 					{
 						// If the next expected joiner has per-player overrides,
 						// temporarily broadcast with their values so their tagger picks them up.
-						var nextJoinIndex = _players.Count;
+						var nextJoinIndex = NextPlannedSlotIndex;
 						int?  nextPlayerHp         = (nextJoinIndex < _plannedTagsOverrides.Count)           ? _plannedTagsOverrides[nextJoinIndex]           : null;
 						int?  nextPlayerShields     = (nextJoinIndex < _plannedShieldsOverrides.Count)       ? _plannedShieldsOverrides[nextJoinIndex]       : null;
 						int?  nextPlayerReloads     = (nextJoinIndex < _plannedReloadsOverrides.Count)       ? _plannedReloadsOverrides[nextJoinIndex]       : null;
@@ -1935,26 +2264,26 @@ namespace LazerTagHostLibrary
 							_gameDefinition.SleepTimeoutMinutes = savedSleep;
 						}
 
-						_nextAnnouncement = DateTime.Now.AddMilliseconds(GameAnnouncementFrequencyMilliseconds);
+						_nextAnnouncement = _clock.Now.AddMilliseconds(GameAnnouncementFrequencyMilliseconds);
 					}
 					break;
 				case HostingStates.AcknowledgePlayerAssignment:
-					if (DateTime.Now >= _stateChangeTimeout) ChangeState(HostingStates.Adding);
+					if (_clock.Now >= _stateChangeTimeout) ChangeState(HostingStates.Adding);
 					break;
 				case HostingStates.Countdown:
 				case HostingStates.ResendCountdown:
 					// Note: ResendCountdown behaviour in zone games is not fully tested.
-					if (HostingState == HostingStates.ResendCountdown && DateTime.Now >= _resendCountdownPlayingStateChangeTimeout)
+					if (HostingState == HostingStates.ResendCountdown && _clock.Now >= _resendCountdownPlayingStateChangeTimeout)
 					{
 						ChangeState(HostingStates.Summary);
 					}
-					else if (DateTime.Now >= _stateChangeTimeout)
+					else if (_clock.Now >= _stateChangeTimeout)
 					{
 						ChangeState(HostingStates.Playing);
 					}
-					else if (DateTime.Now >= _nextAnnouncement)
+					else if (_clock.Now >= _nextAnnouncement)
 					{
-						var remainingSeconds = (byte)((_stateChangeTimeout - DateTime.Now).TotalSeconds);
+						var remainingSeconds = (byte)((_stateChangeTimeout - _clock.Now).TotalSeconds);
 
 						// There does not appear to be a reason to tell the gun the number of players
 						// ahead of time.  It only prevents those players from joining midgame.  The
@@ -1975,15 +2304,15 @@ namespace LazerTagHostLibrary
 
 						Log.Add(Log.Severity.Information, "T-{0}", remainingSeconds);
 
-						_nextAnnouncement = DateTime.Now.AddSeconds(1);
+						_nextAnnouncement = _clock.Now.AddSeconds(1);
 					}
 					break;
 				case HostingStates.Playing:
-					if (DateTime.Now >= _stateChangeTimeout)
+					if (_clock.Now >= _stateChangeTimeout)
 					{
 						ChangeState(HostingStates.Summary);
 					}
-					else if (DateTime.Now >= _nextAnnouncement)
+					else if (_clock.Now >= _nextAnnouncement)
 					{
 						switch (_gameDefinition.GameType)
 						{
@@ -1991,19 +2320,19 @@ namespace LazerTagHostLibrary
 							case GameType.OwnTheZoneTwoTeams:
 							case GameType.OwnTheZoneThreeTeams:
 								Protocol.TransmitSignature(PacketPacker.ZoneBeacon(0, ZoneType.ContestedZone));
-								_nextAnnouncement = DateTime.Now.AddMilliseconds(ZoneBeaconFrequencyMilliseconds);
+								_nextAnnouncement = _clock.Now.AddMilliseconds(ZoneBeaconFrequencyMilliseconds);
 								break;
 							case GameType.Respawn: // RESP
 							case GameType.RespawnTwoTeams: // 2TRS
 							case GameType.RespawnThreeTeams: // 3TRS
 								Protocol.TransmitSignature(PacketPacker.ZoneBeacon(0, ZoneType.TeamZone));
-								_nextAnnouncement = DateTime.Now.AddMilliseconds(ZoneBeaconFrequencyMilliseconds);
+								_nextAnnouncement = _clock.Now.AddMilliseconds(ZoneBeaconFrequencyMilliseconds);
 								break;
 						}
 					}
 					break;
 				case HostingStates.Summary:
-					if (DateTime.Now >= _nextAnnouncement)
+					if (_clock.Now >= _nextAnnouncement)
 					{
 						var undebriefed = new List<Player>();
 						foreach (var player in _players)
@@ -2022,12 +2351,7 @@ namespace LazerTagHostLibrary
 
 						if (nextDebriefPlayer == null)
 						{
-							Log.Add(Log.Severity.Information, "All players debriefed");
-
-							CalculateScores();
-							PrintScoreReport();
-
-							ChangeState(HostingStates.GameOver);
+							CompleteDebrief(false);
 							break;
 						}
 
@@ -2039,13 +2363,14 @@ namespace LazerTagHostLibrary
 						Log.Add(Log.Severity.Information, "Requested tag report from {0}.",
 							nextDebriefPlayer.NameAndNumber);
 
-						_nextAnnouncement = DateTime.Now.AddSeconds(RequestTagReportFrequencySeconds);
+						_nextAnnouncement = _clock.Now.AddSeconds(RequestTagReportFrequencySeconds);
 					}
 					break;
 				case HostingStates.GameOver:
-					if (DateTime.Now >= _nextAnnouncement)
+					if (_clock.Now >= _nextAnnouncement)
 					{
-						_nextAnnouncement = DateTime.Now.AddSeconds(GameOverAnnouncementFrequencySeconds);
+						_nextAnnouncement = _clock.Now.AddSeconds(GameOverAnnouncementFrequencySeconds);
+						if (!AllPlayersDebriefed) break;
 
 						var team = Teams.Team(_rankReportTeamNumber);
 
@@ -2093,6 +2418,30 @@ namespace LazerTagHostLibrary
 			return nextTeamNumber;
 		}
 
+        private bool RemovePlayerFromRoster(Player player)
+        {
+            if (player == null) return false;
+
+            if (player.Team != null)
+            {
+                player.Team.Players.Remove(player);
+            }
+
+            var joinKeys = _joinStates
+                .Where(pair => ReferenceEquals(pair.Value.Player, player))
+                .Select(pair => pair.Key)
+                .ToList();
+            foreach (var key in joinKeys)
+            {
+                _joinStates.Remove(key);
+            }
+
+            if (!_players.Remove(player)) return false;
+            if (HostingState == HostingStates.Adding || HostingState == HostingStates.AcknowledgePlayerAssignment)
+                _nextAnnouncement = _clock.Now;
+            return true;
+        }
+
 	    private void CheckAssignPlayerFailed()
 	    {
 		    var removeKeys = new List<UInt16>();
@@ -2103,7 +2452,7 @@ namespace LazerTagHostLibrary
 
 			    if (!joinState.Failed)
 			    {
-					if (DateTime.Now < joinState.AssignPlayerSendTime.AddSeconds(AcknowledgePlayerAssignmentTimeoutSeconds)) continue;
+					if (_clock.Now < joinState.AssignPlayerSendTime.AddSeconds(AcknowledgePlayerAssignmentTimeoutSeconds)) continue;
 
 					Log.Add(Log.Severity.Warning, "Timed out after {0} seconds waiting for AcknowledgePlayerAssignment from tagger 0x{1:X2} for game {2}.", AcknowledgePlayerAssignmentTimeoutSeconds, taggerId, GameDefinition.GameId);
 
@@ -2114,22 +2463,31 @@ namespace LazerTagHostLibrary
 
 			    if (!joinState.Failed) continue;
 
-			    if (DateTime.Now < joinState.LastAssignPlayerFailSendTime.AddMilliseconds(AssignPlayerFailedFrequencyMilliseconds)) continue;
+			    if (_clock.Now < joinState.LastAssignPlayerFailSendTime.AddMilliseconds(AssignPlayerFailedFrequencyMilliseconds)) continue;
 
 			    var packet = _gameDefinition.UseLtarEnhancedProtocol ? PacketPacker.AssignPlayerFailedEnhanced(joinState.GameId, taggerId) : PacketPacker.AssignPlayerFailed(joinState.GameId, taggerId);
 				Protocol.TransmitPacket(packet);
 
 				joinState.AssignPlayerFailSendCount++;
-			    joinState.LastAssignPlayerFailSendTime = DateTime.Now;
+			    joinState.LastAssignPlayerFailSendTime = _clock.Now;
 
 				if (joinState.AssignPlayerFailSendCount >= AssignPlayerFailedSendCount) removeKeys.Add(taggerId);
 		    }
 
 		    foreach (var key in removeKeys)
 		    {
-			    var player = _joinStates[key].Player;
-				Players.Remove(player.TeamPlayerId);
-				_joinStates.Remove(key);
+                JoinState joinState;
+                if (!_joinStates.TryGetValue(key, out joinState)) continue;
+                if (joinState.PreservePlayerOnFailure)
+                {
+                    _joinStates.Remove(key);
+                    Log.Add(Log.Severity.Warning,
+                        "Repeated join handshake failed for confirmed tagger 0x{0:X2}; preserving existing roster slot.", key);
+                }
+                else
+                {
+                    RemovePlayerFromRoster(joinState.Player);
+                }
 		    }
 
 		    if (removeKeys.Count > 0)

@@ -7,7 +7,7 @@ procedure are documented in the repository [`README.md`](../README.md) and
 
 ## Local development
 
-With the .NET 8 SDK installed:
+With the .NET 10 SDK installed:
 
 ```powershell
 cd C:\Server
