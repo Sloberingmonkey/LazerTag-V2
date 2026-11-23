@@ -467,7 +467,7 @@ async function loadHistory({ preserveDetail = false } = {}) {
         list.innerHTML = games.map(game => {
             const complete = game.resultsFinalized === true
                 ? (game.allPlayersDebriefed ? 'Complete' : 'Finalized with incomplete debrief')
-                : 'Results unavailable';
+                : game.partialResults === true ? 'Partial results' : 'Results unavailable';
             const flags = [complete, `${Number(game.playerCount) || 0} players`, formatHistoryDate(game.endedAtUtc)];
             if (game.endedEarly) flags.unshift('Ended early');
             if (game.forced) flags.unshift('Forced');
@@ -517,7 +517,9 @@ async function showHistory(gameId) {
     detail.innerHTML = '<div class="history-empty">Loading result…</div>';
     try {
         const game = await fetchJson(`/api/history/${encodeURIComponent(gameId)}`);
-        const resultsFinalized = game.resultsFinalized === true;
+        // Partial results were scored from the reports that arrived, so show them too.
+        const partialResults = game.resultsFinalized !== true && game.partialResults === true;
+        const resultsFinalized = game.resultsFinalized === true || partialResults;
         const players = Array.isArray(game.players) ? [...game.players] : [];
         if (resultsFinalized) {
             players.sort((a, b) => historyRank(a) - historyRank(b)
@@ -528,7 +530,8 @@ async function showHistory(gameId) {
                 || String(a.name || a.id || '').localeCompare(String(b.name || b.id || '')));
         }
         const flags = [
-            resultsFinalized ? 'Results finalized' : 'Results unavailable',
+            partialResults ? 'Partial results from the reports received'
+                : resultsFinalized ? 'Results finalized' : 'Results unavailable',
             game.allPlayersDebriefed ? 'All taggers debriefed' : 'Incomplete debrief',
             game.endedEarly ? 'Ended early' : 'Normal duration',
             game.forced ? 'Forced completion' : 'Normal completion',
@@ -1368,7 +1371,7 @@ async function finishDebrief() {
     const missing = missingReportCount(snapshot);
     if (!missing) return;
     const who = missing === 1 ? '1 tagger still owes reports.' : `${missing} taggers still owe reports.`;
-    if (!window.confirm(`${who} Finish now and save incomplete results?`)) return;
+    if (!window.confirm(`${who} Finish now? Scores will use the reports received and be marked partial.`)) return;
     await runAction('btn-finish-debrief', `/api/game/${encodeURIComponent(snapshot.gameId)}/finish-debrief`, {
         successMessage: 'Debriefing finished.',
     });
@@ -1724,8 +1727,9 @@ function overviewMessage(state, connected, planned) {
         return 'Debriefing taggers; final scores are not ready yet.';
     }
     if (state === 'gameover') {
-        return currentSnapshot?.resultsFinalized !== false
-            ? 'Final scores are ready.'
+        if (currentSnapshot?.resultsFinalized !== false) return 'Final scores are ready.';
+        return currentSnapshot?.partialResults === true
+            ? 'Game finished with missing reports; scores use the reports received.'
             : 'Game complete with incomplete results; scores and winners are unavailable.';
     }
     return 'Session active.';

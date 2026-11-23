@@ -138,7 +138,7 @@ test('ordinary and confirmed finish requests use the match the operator was view
     await page.endGame();
     await page.endGame();
     assert.deepEqual(actions, [['btn-end', '/api/game/first/endgame']]);
-    page.window.confirm = prompt => { assert.match(prompt, /1 tagger.*incomplete results/i); return false; };
+    page.window.confirm = prompt => { assert.match(prompt, /1 tagger.*reports received.*partial/i); return false; };
     await page.finishDebrief();
     assert.equal(actions.length, 1);
     page.window.confirm = () => {

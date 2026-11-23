@@ -233,8 +233,8 @@ public sealed partial class ArenaRelayTests
             GameType = GameType.CustomLazerTagTwoTeams, CountdownSeconds = 5,
             Players =
             [
-                new() { Slot = 1, Name = "Rowan", TeamPreference = 1, Hp = 12, Ammo = 17 },
-                new() { Slot = 2, Name = "Finley", TeamPreference = 2, Hp = 23, Ammo = 38 },
+                new() { Slot = 1, Name = "Rowan", TeamPreference = 1, Hp = 12, Ammo = 17, Reloads = 0 },
+                new() { Slot = 2, Name = "Finley", TeamPreference = 2, Hp = 23, Ammo = 38, Reloads = 4 },
             ],
         });
         using var relay = await arena.AcceptRelayAsync();
@@ -284,6 +284,18 @@ public sealed partial class ArenaRelayTests
             history.Players.Select(p => (p.Name, (int)p.TaggerId, p.Hp, p.StartingAmmo)));
         Assert.Equal(3, history.Players[0].HitsScored);
         Assert.Equal(3, history.Players[1].HitsTaken);
+
+        // A per-player 0 means unlimited reloads, like the global setting.
+        Assert.Equal(new[] { 0xff, 4 }, history.Players.Select(p => p.Reloads));
+
+        // Rowan never reported and was dropped, but Finley's report shows Rowan's 3 hits.
+        // The forced finish scores the game from the reports that arrived.
+        Assert.True(history.PartialResults);
+        Assert.True(history.Players[0].Dropped);
+        Assert.Equal((3, 1), (history.Players[0].Score, history.Players[0].Rank));
+        Assert.Equal((0, 2), (history.Players[1].Score, history.Players[1].Rank));
+        var finalState = await arena.StateAsync();
+        Assert.Equal((false, true), (finalState.ResultsFinalized, finalState.PartialResults));
     }
 
     [Fact]

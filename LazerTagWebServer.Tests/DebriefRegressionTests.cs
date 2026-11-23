@@ -40,6 +40,9 @@ public sealed class DebriefRegressionTests
         Assert.True(host.FinishDebrief());
         Assert.False(host.FinishDebrief());
         Assert.Equal(HostGun.HostingStates.GameOver, host.HostingState);
+        // A forced finish scores from the reports that arrived and is marked partial.
+        Assert.Equal(!complete, host.PartialScores);
+        Assert.Equal(!complete, host.DebriefForced);
         if (!complete) Assert.False(host.ProcessPacket(last));
 
         sent.Clear();

@@ -331,6 +331,8 @@ private int CountEffectiveHitsScoredCore(Player player)
         private int EffectiveHitsOnCore(Player attacker, Player target)
         {
             if (attacker == null || target == null || ReferenceEquals(attacker, target)) return 0;
+            // A dropped target's reports are incomplete, so hits on it are not scored.
+            if (target.Dropped) return 0;
 
             var attackerIndex = attacker.TeamPlayerId.PlayerNumber - 1;
             var targetIndex = target.TeamPlayerId.PlayerNumber - 1;
@@ -1144,10 +1146,11 @@ private int CountEffectiveHitsScoredCore(Player player)
 			return true;
 		}
 
+        // Scores use every report that arrived. A dropped tagger's hits on other players
+        // come from those players' reports and still count; hits on the dropped tagger
+        // were in its own missing reports, so EffectiveHitsOnCore scores none of them.
         private void CalculateScores()
         {
-	        RemoveDroppedPlayerTags();
-
             switch (_gameDefinition.GameType)
 			{
 				case GameType.OwnTheZone:
@@ -1191,24 +1194,6 @@ private int CountEffectiveHitsScoredCore(Player player)
 					break;
 			}
         }
-
-		private void RemoveDroppedPlayerTags()
-	    {
-		    foreach (var droppedPlayer in Players.Where(droppedPlayer => droppedPlayer.Dropped))
-		    {
-			    droppedPlayer.TagsTaken = 0;
-
-			    foreach (var otherPlayer in Players)
-			    {
-				    droppedPlayer.TaggedPlayerCounts[otherPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-				    droppedPlayer.TaggedByPlayerCounts[otherPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-
-				    otherPlayer.TagsTaken -= otherPlayer.TaggedByPlayerCounts[droppedPlayer.TeamPlayerId.PlayerNumber - 1];
-				    otherPlayer.TaggedPlayerCounts[droppedPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-				    otherPlayer.TaggedByPlayerCounts[droppedPlayer.TeamPlayerId.PlayerNumber - 1] = 0;
-			    }
-		    }
-	    }
 
 	    private void CalculateScoresOwnTheZone()
 		{
@@ -1555,6 +1540,7 @@ private int CountEffectiveHitsScoredCore(Player player)
 			case HostingStates.Summary:
 				Log.Add(Log.Severity.Information, "Debriefing");
 				DebriefForced = false;
+				PartialScores = false;
 				// Debrief is driven by RequestTagReport. AssignPlayerSuccess (0x87) is
 				// an assignment-stage release, not a debrief preamble. The former release
 				// burst followed by another directed release made roster player 2 receive
@@ -1584,6 +1570,12 @@ private int CountEffectiveHitsScoredCore(Player player)
 
         public bool DebriefForced { get; private set; }
 
+        /// <summary>
+        /// True when the operator finished a debrief with missing reports and the scores
+        /// were calculated from the reports that did arrive. Such scores are not final.
+        /// </summary>
+        public bool PartialScores { get; private set; }
+
         public bool AllPlayersDebriefed
         {
             get
@@ -1607,15 +1599,16 @@ private int CountEffectiveHitsScoredCore(Player player)
         {
             var complete = AllPlayersDebriefed;
             DebriefForced = requestedByOperator && !complete;
-            if (complete)
-            {
-                CalculateScores();
-                PrintScoreReport();
-            }
-            else if (requestedByOperator)
+            if (!complete && requestedByOperator)
             {
                 foreach (var player in _players)
                     if (!player.AllTagReportsReceived()) DropPlayer(player.TeamPlayerId);
+            }
+            if (complete || requestedByOperator)
+            {
+                CalculateScores();
+                PrintScoreReport();
+                PartialScores = !complete;
             }
             ChangeState(HostingStates.GameOver);
         }

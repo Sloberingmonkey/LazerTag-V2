@@ -116,6 +116,7 @@ public sealed class GameHistoryStore
                     EndedEarly = record.EndedEarly,
                     Forced = record.Forced,
                     AllPlayersDebriefed = record.AllPlayersDebriefed,
+                    PartialResults = record.PartialResults,
                     PlayerCount = record.Players.Count,
                 });
 

@@ -290,7 +290,8 @@ public sealed class HostGunService : IAsyncDisposable
             var plannedTeams      = players.Select(p => p.TeamPreference).ToList();
             var plannedHp         = players.Select(p => p.Hp).ToList();
             var plannedShields    = players.Select(p => p.Shields).ToList();
-            var plannedReloads    = players.Select(p => p.Reloads).ToList();
+            // 0 reloads means unlimited, matching the global setting, which maps 0 to 0xff.
+            var plannedReloads    = players.Select(p => p.Reloads == 0 ? 0xff : p.Reloads).ToList();
             var plannedAutoReload = players.Select(p => p.AutoReload).ToList();
             var plannedFullAuto   = players.Select(p => p.FullAuto).ToList();
             var plannedAmmo       = players.Select(p => p.Ammo).ToList();
@@ -691,6 +692,7 @@ public sealed class HostGunService : IAsyncDisposable
                 EndedEarly = session.EndedEarly,
                 Forced = hg.DebriefForced,
                 AllPlayersDebriefed = hg.AllPlayersDebriefed,
+                PartialResults = hg.PartialScores,
                 Settings = session.Settings,
                 Players = players
                     .OrderBy(player => player.TeamPlayerId.PlayerNumber)
@@ -849,6 +851,9 @@ public sealed class HostGunService : IAsyncDisposable
         bool resultsFinalized = gameId != null
             && hostingState == HostGun.HostingStates.GameOver
             && hg.AllPlayersDebriefed;
+        bool partialResults = gameId != null
+            && hostingState == HostGun.HostingStates.GameOver
+            && hg.PartialScores;
 
         int nextSlot = hg.NextPlannedSlotIndex;
         string guidedJoinHint;
@@ -880,6 +885,7 @@ public sealed class HostGunService : IAsyncDisposable
             TeamCount            = isTeam ? definition?.TeamCount ?? 0 : 0,
             PlannedPlayerCount   = plannedNames.Length,
             ResultsFinalized     = resultsFinalized,
+            PartialResults       = partialResults,
             Settings             = activeSettings,
             GuidedJoinHint       = guidedJoinHint,
             PhaseRemainingMs     = hostingState is HostGun.HostingStates.Playing or HostGun.HostingStates.Countdown or HostGun.HostingStates.ResendCountdown

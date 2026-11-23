@@ -548,7 +548,8 @@ function applyState(snapshot, generation) {
             players,
             Boolean(snapshot.isTeamGame),
             snapshot.teams,
-            snapshot.resultsFinalized !== false);
+            snapshot.resultsFinalized !== false,
+            snapshot.partialResults === true);
         return;
     }
 
@@ -707,18 +708,22 @@ function renderDebrief(players) {
     }).join('');
 }
 
-function renderScores(players, isTeamGame, authoritativeTeams, resultsFinalized) {
+function renderScores(players, isTeamGame, authoritativeTeams, resultsFinalized, partialResults) {
     const list = document.getElementById('scores-list');
-    const finalized = resultsFinalized !== false;
+    // Partial results were scored from the reports that arrived; show them with a note.
+    const partial = resultsFinalized === false && partialResults === true;
+    const finalized = resultsFinalized !== false || partial;
     const title = document.getElementById('scores-title');
     const subtitle = document.getElementById('scores-subtitle');
 
     title.textContent = finalized ? 'GAME OVER' : 'INCOMPLETE RESULTS';
     title.classList.toggle('incomplete', !finalized);
-    subtitle.textContent = finalized
-        ? ''
-        : 'The game ended before complete reports were received. Scores and winners are unavailable; hit totals may be partial.';
-    subtitle.classList.toggle('active', !finalized);
+    subtitle.textContent = partial
+        ? 'Some taggers did not report. Scores use the reports that were received.'
+        : finalized
+            ? ''
+            : 'The game ended before complete reports were received. Scores and winners are unavailable; hit totals may be partial.';
+    subtitle.classList.toggle('active', !finalized || partial);
     list.classList.toggle('incomplete', !finalized);
     list.innerHTML = '';
 

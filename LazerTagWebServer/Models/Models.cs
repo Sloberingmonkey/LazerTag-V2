@@ -95,6 +95,9 @@ public class GameStateSnapshot
 
     /// <summary>True only after a complete, non-forced debrief finalized library scores.</summary>
     public bool   ResultsFinalized { get; set; }
+
+    /// <summary>True after a forced finish scored the game from the reports that arrived.</summary>
+    public bool   PartialResults { get; set; }
     public GameHistorySettings? Settings { get; set; }
     public string GuidedJoinHint { get; set; } = "";
 

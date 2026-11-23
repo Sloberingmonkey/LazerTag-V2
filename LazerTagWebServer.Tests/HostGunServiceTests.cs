@@ -181,6 +181,7 @@ public sealed class HostGunServiceTests
             Assert.False(record.AllPlayersDebriefed);
             Assert.True(record.Forced);
             Assert.False(record.ResultsFinalized);
+            Assert.True(record.PartialResults);
             Assert.Empty(record.Teams);
             Assert.Equal(Enumerable.Range(1, 10), record.Players.Select(player => player.Slot));
             Assert.All(record.Players, player => Assert.Equal(0, player.Team));
