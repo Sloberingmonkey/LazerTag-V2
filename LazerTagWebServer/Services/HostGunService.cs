@@ -766,9 +766,12 @@ public sealed class HostGunService : IAsyncDisposable
                         .Select(team => new GameHistoryTeam
                         {
                             Team = team.Number,
-                            Score = team.Score,
+                            // team.Score is the game type's ranking key (1024 per survivor in
+                            // team games), not points; publish the players' points instead.
+                            Score = players.Where(player => player.TeamPlayerId.TeamNumber == team.Number).Sum(player => player.Score),
                             Rank = team.Rank,
                             PlayerCount = players.Count(player => player.TeamPlayerId.TeamNumber == team.Number),
+                            Survivors = players.Count(player => player.TeamPlayerId.TeamNumber == team.Number && player.Survived),
                         })
                         .ToList()
                     : [],
@@ -961,8 +964,10 @@ public sealed class HostGunService : IAsyncDisposable
                     .Select(team => new TeamSnapshot
                     {
                         Number = team.Number,
-                        Score = team.Score,
+                        // team.Score is the ranking key, not points (see CreateCompletedGameRecord).
+                        Score = players.Where(p => p.TeamPlayerId.TeamNumber == team.Number).Sum(p => p.Score),
                         Rank = team.Rank,
+                        Survivors = players.Count(p => p.TeamPlayerId.TeamNumber == team.Number && p.Survived),
                     }).ToList()
                 : [],
         };

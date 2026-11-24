@@ -83,6 +83,7 @@ public sealed record GameHistoryTeam
     public int Score { get; init; }
     public int Rank { get; init; }
     public int PlayerCount { get; init; }
+    public int Survivors { get; init; }
 }
 
 public sealed record CompletedGameSummary

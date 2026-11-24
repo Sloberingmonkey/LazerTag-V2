@@ -140,9 +140,12 @@ public class PlayerSnapshot
 /// <summary>Authoritative team result calculated by the game engine.</summary>
 public class TeamSnapshot
 {
-    public int Number { get; set; }
-    public int Score  { get; set; }
-    public int Rank   { get; set; }
+    public int Number    { get; set; }
+    // Sum of the team's player scores. Rank comes from the game type's own formula
+    // (team games rank survivors first), so the team with more points can still lose.
+    public int Score     { get; set; }
+    public int Rank      { get; set; }
+    public int Survivors { get; set; }
 }
 
 // ── Responses ─────────────────────────────────────────────────────────────────
