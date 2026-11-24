@@ -193,6 +193,54 @@ public sealed class HostGunServiceTests
     }
 
     [Fact]
+    public async Task Team_points_are_player_totals_not_the_survivor_ranking_key()
+    {
+        // Field report: team 2 scored 10 and survived, team 1 scored 5 and was tagged out.
+        // The team-game ranking key gave team 2 1064 (1024 per survivor + 4 x 10) and team 1 0,
+        // and the TV printed those as points.
+        string dataDirectory = CreateTemporaryDirectory();
+        var service = CreateService(dataDirectory);
+        try
+        {
+            var host = CreateJoinedHost(GameType.CustomLazerTagTwoTeams, [1, 2]);
+            AttachHost(service, host, plannedPlayerCount: 2);
+
+            var team1Player = host.Players.Single(p => p.TeamPlayerId.TeamNumber == 1);
+            var team2Player = host.Players.Single(p => p.TeamPlayerId.TeamNumber == 2);
+            team1Player.Score = 5;
+            team1Player.Survived = false;
+            team2Player.Score = 10;
+            team2Player.Survived = true;
+            host.Teams.Team(1)!.Score = 0;
+            host.Teams.Team(1)!.Rank = 2;
+            host.Teams.Team(2)!.Score = 1064;
+            host.Teams.Team(2)!.Rank = 1;
+
+            GameStateSnapshot snapshot = service.GetGameState();
+            Assert.Equal((5, 2, 0), (snapshot.Teams[0].Score, snapshot.Teams[0].Rank, snapshot.Teams[0].Survivors));
+            Assert.Equal((10, 1, 1), (snapshot.Teams[1].Score, snapshot.Teams[1].Rank, snapshot.Teams[1].Survivors));
+
+            Type sessionType = typeof(HostGunService).GetNestedType(
+                "ActiveGameHistory", BindingFlags.NonPublic)!;
+            object session = Activator.CreateInstance(sessionType)!;
+            sessionType.GetProperty("GameTypeLabel")!.SetValue(session, "Team Test");
+            sessionType.GetProperty("HostedAtUtc")!.SetValue(session, DateTimeOffset.UtcNow.AddMinutes(-10));
+            sessionType.GetProperty("EndedAtUtc")!.SetValue(session, DateTimeOffset.UtcNow);
+            MethodInfo projector = typeof(HostGunService).GetMethod(
+                "CreateCompletedGameRecord", BindingFlags.Static | BindingFlags.NonPublic)!;
+            var record = (CompletedGameRecord)projector.Invoke(null, [host, session])!;
+
+            Assert.Equal((5, 2, 0), (record.Teams[0].Score, record.Teams[0].Rank, record.Teams[0].Survivors));
+            Assert.Equal((10, 1, 1), (record.Teams[1].Score, record.Teams[1].Rank, record.Teams[1].Survivors));
+        }
+        finally
+        {
+            await service.DisposeAsync();
+            TryDeleteDirectory(dataDirectory);
+        }
+    }
+
+    [Fact]
     public void Pi_host_requires_a_network_relay_address()
     {
         string directory = CreateTemporaryDirectory();

@@ -771,7 +771,9 @@ function renderScores(players, isTeamGame, authoritativeTeams, resultsFinalized,
             };
             const authoritativeScore = Number(result?.score);
             const authoritativeRank = Number(result?.rank);
+            const survivors = Number(result?.survivors);
             if (Number.isFinite(authoritativeScore)) current.score = authoritativeScore;
+            if (Number.isInteger(survivors) && survivors >= 0) current.survivors = survivors;
             if (Number.isInteger(authoritativeRank) && authoritativeRank > 0) current.rank = authoritativeRank;
             teamTotals.set(team, current);
         });
@@ -812,7 +814,7 @@ function renderScores(players, isTeamGame, authoritativeTeams, resultsFinalized,
         return `<div class="team-chip${winner ? ' winner' : ''}" style="border-color:${color}">
           <span class="team-chip-name" style="color:${color}">${teamName(team)}</span>
           <span class="team-chip-score">${finalized ? `${totals.score} pts` : '&mdash;'}</span>
-          <span class="team-chip-detail">${totals.hitsScored} hits &middot; ${totals.hitsTaken} taken</span>
+          <span class="team-chip-detail">${totals.hitsScored} hits &middot; ${totals.hitsTaken} taken${finalized && Number.isInteger(totals.survivors) ? ` &middot; ${totals.survivors} survived` : ''}</span>
           <span class="team-chip-badge">${winner ? (winners.length > 1 ? 'TIE' : '🏆 WIN') : '&nbsp;'}</span>
         </div>`;
     }).join('');
