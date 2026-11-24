@@ -590,6 +590,7 @@ input:invalid { border-color: var(--red); }
 .live-player-name span { margin-top: 2px; color: var(--muted); font-size: 10px; }
 .live-player-status { color: var(--amber); font-size: 11px; font-weight: 750; }
 .live-player.is-confirmed .live-player-status { color: var(--green); }
+.live-remove-btn { margin-left: 8px; padding: 3px 9px; font-size: 11px; }
 .empty-state {
   min-height: 210px;
   display: flex;

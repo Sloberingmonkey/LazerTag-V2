@@ -224,6 +224,42 @@ public sealed partial class ArenaRelayTests
     }
 
     [Fact]
+    public async Task Removing_a_lobby_player_frees_the_seat_for_a_rebooted_tagger()
+    {
+        await using var arena = new Arena();
+        await arena.LoginAsync();
+        var start = arena.StartAsync(new StartGameRequest
+        {
+            CountdownSeconds = 5, Players = [new() { Slot = 1 }, new() { Slot = 2 }],
+        });
+        using var relay = await arena.AcceptRelayAsync();
+        (await start).EnsureSuccessStatusCode();
+        await relay.WaitForLineAsync("CMD 10 81 9 0");
+        byte game = await relay.ReadDataByteAsync();
+        foreach (byte id in new byte[] { 1, 2 })
+        {
+            await relay.SendPacketAsync(PacketType.RequestJoinGameEnhanced, game, id);
+            await relay.SendPacketAsync(PacketType.AcknowledgePlayerAssignmentEnhanced, game, id);
+        }
+        await arena.WaitUntilAsync(async () => (await arena.StateAsync()).Players.Count(p => p.Confirmed) == 2);
+        string match = (await arena.StateAsync()).GameId!;
+
+        // Tagger 2 is power-cycled and comes back as tagger 3. Freeing its old entry lets it rejoin.
+        Assert.Equal(HttpStatusCode.Conflict, (await arena.PostAsync($"{match}/players/9/remove")).StatusCode);
+        (await arena.PostAsync($"{match}/players/2/remove")).EnsureSuccessStatusCode();
+        Assert.Equal(new[] { 1 }, (await arena.StateAsync()).Players.Select(p => p.TaggerId));
+        await relay.SendPacketAsync(PacketType.RequestJoinGameEnhanced, game, 3);
+        await relay.SendPacketAsync(PacketType.AcknowledgePlayerAssignmentEnhanced, game, 3);
+        await arena.WaitUntilAsync(async () => (await arena.StateAsync()).Players.Count(p => p.Confirmed) == 2);
+        Assert.Equal(new[] { 1, 3 }, (await arena.StateAsync()).Players.Select(p => p.TaggerId).Order());
+
+        // Once the countdown starts, no one can be removed.
+        (await arena.PostAsync("countdown")).EnsureSuccessStatusCode();
+        Assert.Equal(HttpStatusCode.Conflict, (await arena.PostAsync($"{match}/players/1/remove")).StatusCode);
+        Assert.Equal(2, (await arena.StateAsync()).Players.Count);
+    }
+
+    [Fact]
     public async Task Expired_first_reservation_reopens_its_own_guided_seat()
     {
         await using var arena = new Arena();

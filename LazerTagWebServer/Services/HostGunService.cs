@@ -573,6 +573,40 @@ public sealed class HostGunService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Frees a lobby seat, for example after a tagger was power-cycled and came back with a
+    /// new tagger ID. Only allowed before the countdown, so no tagger is removed mid-game.
+    /// </summary>
+    public async Task<bool> RemoveLobbyPlayerAsync(Guid gameId, byte taggerId)
+    {
+        await _lifecycleGate.WaitAsync();
+        try
+        {
+            var hg = _hostGun;
+            if (hg == null || !IsCurrentGame(gameId)) return false;
+
+            string? removedName = hg.WithStateLock(() =>
+            {
+                if (hg.HostingState is not (HostGun.HostingStates.Adding or HostGun.HostingStates.AcknowledgePlayerAssignment))
+                    return null;
+                var player = hg.Players.FirstOrDefault(p => (byte)p.TaggerId == taggerId);
+                if (player == null) return null;
+                string name = player.NameAndNumber;
+                hg.DropPlayer(player.TeamPlayerId);
+                return hg.Players.Contains(player) ? null : name;
+            });
+            if (removedName == null) return false;
+
+            await PushLogAsync($"Removed {removedName} (tagger 0x{taggerId:X2}) from the lobby. Its seat is open again.");
+            await PushStateAsync();
+            return true;
+        }
+        finally
+        {
+            _lifecycleGate.Release();
+        }
+    }
+
     public async Task<bool> FinishDebriefAsync(Guid gameId)
     {
         await _lifecycleGate.WaitAsync();
@@ -605,6 +639,7 @@ public sealed class HostGunService : IAsyncDisposable
     private async Task CleanupHostCoreAsync(bool pushUpdates)
     {
         _updateTimer.Change(Timeout.Infinite, Timeout.Infinite);
+        // Let a tick already inside Update finish, so the GameOver check below sees its result.
         await WaitForUpdateTickAsync();
 
         HostGun? hg;
@@ -625,6 +660,10 @@ public sealed class HostGunService : IAsyncDisposable
             _countdownStartedAtMs = 0;
             _gameStartedAtMs = 0;
         }
+
+        // A tick that read the host before it was cleared above may still be running.
+        // Ticks that start now see no host, so after this wait nothing uses the old one.
+        await WaitForUpdateTickAsync();
 
         if (hg != null)
         {
@@ -938,24 +977,23 @@ public sealed class HostGunService : IAsyncDisposable
 
     private async void OnUpdateTick(object? _)
     {
-        var hg = _hostGun;
-        if (hg != null)
+        // Mark the tick busy before reading the host. Cleanup clears _hostGun first and then
+        // waits while this flag is set, so a tick never updates a host after it is disposed.
+        if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0) return;
+        try
         {
-            if (Interlocked.CompareExchange(ref _isUpdating, 1, 0) != 0) return;
-
-            try
-            {
-                hg.Update();
-            }
-            catch (Exception ex)
-            {
-                _log.LogError(ex, "Update tick error");
-                return;
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _isUpdating, 0);
-            }
+            HostGun? hg;
+            lock (_lock) hg = _hostGun;
+            hg?.Update();
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex, "Update tick error");
+            return;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isUpdating, 0);
         }
 
         if (!TryBeginPeriodicBroadcast()) return;

@@ -2370,7 +2370,9 @@ private void DropPlayerCore(TeamPlayerId teamPlayerId)
 					if (_clock.Now >= _nextAnnouncement)
 					{
 						_nextAnnouncement = _clock.Now.AddSeconds(GameOverAnnouncementFrequencySeconds);
-						if (!AllPlayersDebriefed) break;
+						// Ranks go out after a complete debrief, or after a forced finish
+						// that scored the game from the reports received.
+						if (!AllPlayersDebriefed && !PartialScores) break;
 
 						var team = Teams.Team(_rankReportTeamNumber);
 

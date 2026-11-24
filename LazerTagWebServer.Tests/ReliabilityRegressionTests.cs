@@ -11,6 +11,36 @@ namespace LazerTagWebServer.Tests;
 public sealed class ReliabilityRegressionTests
 {
     [Fact]
+    public async Task Disconnect_cancels_a_relay_connect_attempt_in_progress()
+    {
+        // A relay that accepts the socket but never answers HELLO keeps Connect retrying
+        // (five 2-second handshakes plus delays). Disconnect must not wait all that out.
+        using var silentRelay = new TcpListener(IPAddress.Loopback, 0);
+        silentRelay.Start();
+        int port = ((IPEndPoint)silentRelay.LocalEndpoint).Port;
+        var accepted = new List<TcpClient>();
+        try
+        {
+            var serial = new LazerTagSerial();
+            var connecting = Task.Run(() => serial.Connect($"127.0.0.1:{port}"));
+            accepted.Add(await silentRelay.AcceptTcpClientAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+
+            var timer = Stopwatch.StartNew();
+            serial.Disconnect();
+            timer.Stop();
+            Assert.False(await connecting.WaitAsync(TimeSpan.FromSeconds(2)));
+            Assert.True(timer.ElapsedMilliseconds < 1500, $"Disconnect took {timer.ElapsedMilliseconds} ms.");
+            Assert.False(serial.IsConnected);
+            serial.Dispose();
+        }
+        finally
+        {
+            foreach (var client in accepted) client.Dispose();
+            silentRelay.Stop();
+        }
+    }
+
+    [Fact]
     public void Countdown_play_and_reconnect_snapshots_follow_elapsed_time()
     {
         TimeSpan elapsed = TimeSpan.Zero;

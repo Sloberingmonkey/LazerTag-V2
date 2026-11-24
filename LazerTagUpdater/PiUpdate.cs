@@ -49,7 +49,7 @@ internal static class PiUpdate
         progress.Report(new("Checking the Linux ARM64 release…"));
         using var archive = File.OpenRead(archivePath);
         string digest = ReleaseArchive.CheckAndHash(archive, token);
-        byte[]? helper = ReadCompanionHelper(archivePath);
+        byte[] helper = ReadCompanionHelper(archivePath);
         using var key = OpenKey(keyPath, keyPassphrase);
         using AuthenticationMethod auth = key == null
             ? new PasswordAuthenticationMethod(username, password)
@@ -77,14 +77,16 @@ internal static class PiUpdate
         await DeployAsync(Run, archive, digest, password, progress, token, helper);
     }
 
-    internal static byte[]? ReadCompanionHelper(string archivePath)
+    // The release checker built into this updater is always installed, so a folder without
+    // lazertag-deploy-update.sh can't leave an older checker on the Pi. An adjacent copy is
+    // optional, but if present it must match, which catches mixed-up install kits.
+    internal static byte[] ReadCompanionHelper(string archivePath)
     {
-        string path = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(archivePath))!, HelperFileName);
-        if (!File.Exists(path)) return null;
         using var bundled = typeof(PiUpdate).Assembly.GetManifestResourceStream("LazerTagUpdater.deploy.sh")!;
         using var reader = new StreamReader(bundled);
         string script = reader.ReadToEnd().ReplaceLineEndings("\n");
-        if (File.ReadAllText(path).ReplaceLineEndings("\n") != script)
+        string path = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(archivePath))!, HelperFileName);
+        if (File.Exists(path) && File.ReadAllText(path).ReplaceLineEndings("\n") != script)
             throw new InvalidDataException("Choose the release checker and Windows updater from the same install kit.");
         return Encoding.UTF8.GetBytes(script);
     }

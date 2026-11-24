@@ -28,15 +28,14 @@ public class SshTransferTests(ITestOutputHelper log)
                 await File.WriteAllBytesAsync(file, fixture.ToArray());
             }
             else File.Copy(supplied, file);
-            byte[]? helper = null;
+            // The built-in release checker is installed whether or not the folder has a copy.
+            string script;
+            using (var source = typeof(PiUpdate).Assembly.GetManifestResourceStream("LazerTagUpdater.deploy.sh")!)
+            using (var reader = new StreamReader(source))
+                script = (await reader.ReadToEndAsync()).ReplaceLineEndings("\n");
+            byte[] helper = Encoding.UTF8.GetBytes(script);
             if (withHelper)
-            {
-                using var source = typeof(PiUpdate).Assembly.GetManifestResourceStream("LazerTagUpdater.deploy.sh")!;
-                using var reader = new StreamReader(source);
-                string script = (await reader.ReadToEndAsync()).ReplaceLineEndings("\n");
-                helper = Encoding.UTF8.GetBytes(script);
                 await File.WriteAllTextAsync(Path.Combine(directory.FullName, PiUpdate.HelperFileName), script);
-            }
             using var expected = File.OpenRead(file);
             string hash = Convert.ToHexString(SHA256.HashData(expected)).ToLowerInvariant();
             string password = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
@@ -97,7 +96,7 @@ public class SshTransferTests(ITestOutputHelper log)
                                 else if (command == PiUpdate.ReadState) output = "{\"state\":\"Idle\"}";
                                 else if (command.StartsWith($"umask 077; if cat > '{stage}/deploy.sh'"))
                                 {
-                                    receivedHelper = helper != null && receivedArchive && bytes.ToArray().SequenceEqual(helper)
+                                    receivedHelper = receivedArchive && bytes.ToArray().SequenceEqual(helper)
                                         && command.Contains(Convert.ToHexString(SHA256.HashData(helper)).ToLowerInvariant());
                                     if (!receivedHelper) exit = 1;
                                 }
@@ -111,7 +110,9 @@ public class SshTransferTests(ITestOutputHelper log)
                                 }
                                 else if (command.StartsWith("sudo") && command.Contains("/bin/sh -ec"))
                                 {
-                                    helperInstalled = receivedHelper && Encoding.UTF8.GetString(bytes.ToArray()) == password + "\n"
+                                    bool helperSudoOk = useKey ? bytes.Length == 0 && command.StartsWith("sudo -n")
+                                        : Encoding.UTF8.GetString(bytes.ToArray()) == password + "\n";
+                                    helperInstalled = receivedHelper && helperSudoOk
                                         && command.Contains("/usr/local/sbin/lazertag-deploy")
                                         && command.Contains($"sh '{stage}/deploy.sh'");
                                     if (!helperInstalled) exit = 1;
@@ -120,9 +121,8 @@ public class SshTransferTests(ITestOutputHelper log)
                                 {
                                     sudoInputOk = useKey ? bytes.Length == 0 && command.StartsWith("sudo -n")
                                         : Encoding.UTF8.GetString(bytes.ToArray()) == password + "\n";
-                                    string expectedCommand = $"/usr/local/sbin/lazertag-deploy '{stage}/release.tar.gz'";
-                                    if (withHelper) expectedCommand += $" --sha256 '{hash}'";
-                                    if (!receivedArchive || !sudoInputOk || helperInstalled != withHelper || !command.Contains("systemd-run --wait")
+                                    string expectedCommand = $"/usr/local/sbin/lazertag-deploy '{stage}/release.tar.gz' --sha256 '{hash}'";
+                                    if (!receivedArchive || !sudoInputOk || !helperInstalled || !command.Contains("systemd-run --wait")
                                         || !command.EndsWith(expectedCommand)) exit = 1;
                                 }
                                 else if (!command.StartsWith("test -x") && !command.StartsWith("rm -f")) exit = 1;
@@ -144,7 +144,7 @@ public class SshTransferTests(ITestOutputHelper log)
                 new TrustedHosts(directory.FullName), (_, fingerprint) => prompted = fingerprint.StartsWith("SHA256:"),
                 () => { unlocked = true; return passphrase; }, progress, deadline.Token).WaitAsync(TimeSpan.FromSeconds(50));
             Assert.True(prompted && receivedArchive && sudoInputOk);
-            Assert.Equal(withHelper, receivedHelper && helperInstalled);
+            Assert.True(receivedHelper && helperInstalled);
             Assert.Equal(useKey, unlocked);
             Assert.DoesNotContain(commands, command => command.Contains(password));
             Assert.StartsWith("rm -f", commands[^1]);
