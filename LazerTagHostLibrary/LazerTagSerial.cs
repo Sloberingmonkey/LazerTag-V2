@@ -54,6 +54,8 @@ namespace LazerTagHostLibrary
 
         private bool _disposed;
         private Task<bool> _reconnectTask;
+        // Cancelled by Disconnect/Dispose so they don't wait out a slow connect and its retries.
+        private CancellationTokenSource _connectAttempt;
 
         public LazerTagSerial() : this(null) { }
 
@@ -158,9 +160,12 @@ namespace LazerTagHostLibrary
                 return false;
             }
 
+            CancellationTokenSource attempt;
             lock (_stateLock)
             {
                 if (_disposed) return false;
+                attempt = new CancellationTokenSource();
+                _connectAttempt = attempt;
             }
 
             try
@@ -177,7 +182,7 @@ namespace LazerTagHostLibrary
 
                 if (_isTcp)
                 {
-                    return ConnectTcpWithRetry(portName);
+                    return ConnectTcpWithRetry(portName, attempt.Token);
                 }
 
                 return ConnectSerial(portName);
@@ -188,6 +193,22 @@ namespace LazerTagHostLibrary
                 Log.Add("Connect() failed.", ex);
                 DisconnectCore();
                 return false;
+            }
+            finally
+            {
+                lock (_stateLock)
+                {
+                    if (ReferenceEquals(_connectAttempt, attempt)) _connectAttempt = null;
+                }
+                attempt.Dispose();
+            }
+        }
+
+        private void CancelConnectAttempt()
+        {
+            lock (_stateLock)
+            {
+                try { _connectAttempt?.Cancel(); } catch (ObjectDisposedException) { }
             }
         }
 
@@ -221,7 +242,7 @@ namespace LazerTagHostLibrary
             return true;
         }
 
-        private bool ConnectTcpWithRetry(string address)
+        private bool ConnectTcpWithRetry(string address, CancellationToken cancel)
         {
             for (int attempt = 1; attempt <= TcpConnectRetryCount; attempt++)
             {
@@ -229,12 +250,19 @@ namespace LazerTagHostLibrary
                 {
                     if (_disposed) return false;
                 }
+                if (cancel.IsCancellationRequested) return false;
 
                 _reportDiagnostic?.Invoke(HostDiagnostic.RelayConnectAttempt);
                 HostDiagnostic outcome;
                 try
                 {
-                    outcome = ConnectTcpOnce(address);
+                    outcome = ConnectTcpOnce(address, cancel);
+                }
+                catch (Exception) when (cancel.IsCancellationRequested)
+                {
+                    CloseTcpObjects();
+                    Log.Add(Log.Severity.Information, "TCP relay connect attempt cancelled.");
+                    return false;
                 }
                 catch (Exception ex)
                 {
@@ -252,6 +280,7 @@ namespace LazerTagHostLibrary
                 {
                     if (_disposed) return false;
                 }
+                if (cancel.IsCancellationRequested && outcome != HostDiagnostic.RelayConnected) return false;
                 _reportDiagnostic?.Invoke(outcome);
                 if (outcome == HostDiagnostic.RelayConnected)
                 {
@@ -260,16 +289,16 @@ namespace LazerTagHostLibrary
                     return true;
                 }
 
-                if (attempt < TcpConnectRetryCount)
+                if (attempt < TcpConnectRetryCount && cancel.WaitHandle.WaitOne(TcpConnectRetryDelayMs))
                 {
-                    Thread.Sleep(TcpConnectRetryDelayMs);
+                    return false;
                 }
             }
 
             return false;
         }
 
-        private HostDiagnostic ConnectTcpOnce(string address)
+        private HostDiagnostic ConnectTcpOnce(string address, CancellationToken cancel)
         {
             string host = address;
             int port = TcpDefaultPort;
@@ -284,8 +313,11 @@ namespace LazerTagHostLibrary
             Log.Add(Log.Severity.Information, "Connecting to TCP relay at {0}:{1}...", host, port);
 
             var tcpClient = new TcpClient();
+            // Closing the socket wakes both the connect wait and a blocked handshake read.
+            var cancelRegistration = cancel.Register(() => { try { tcpClient.Close(); } catch { } });
             try
             {
+                cancel.ThrowIfCancellationRequested();
                 var connectResult = tcpClient.BeginConnect(host, port, null, null);
                 var waitHandle = connectResult.AsyncWaitHandle;
                 try
@@ -333,6 +365,16 @@ namespace LazerTagHostLibrary
 
                 tcpStream.ReadTimeout = TcpReadTimeoutMs;
 
+                // From here the socket may become the live connection, so a late cancel must
+                // not close it. Dispose waits for a callback that is already running.
+                cancelRegistration.Dispose();
+                if (cancel.IsCancellationRequested)
+                {
+                    try { tcpStream.Close(); } catch { }
+                    try { tcpClient.Close(); } catch { }
+                    throw new OperationCanceledException(cancel);
+                }
+
                 lock (_stateLock)
                 {
                     if (_disposed)
@@ -353,6 +395,10 @@ namespace LazerTagHostLibrary
             {
                 try { tcpClient.Close(); } catch { }
                 throw;
+            }
+            finally
+            {
+                cancelRegistration.Dispose();
             }
 
             Log.Add(Log.Severity.Information, "TCP relay connected at {0}:{1}", host, port);
@@ -449,6 +495,8 @@ namespace LazerTagHostLibrary
 
         public void Disconnect()
         {
+            // Stop a connect attempt in progress first; it holds _connectionLock while it retries.
+            CancelConnectAttempt();
             lock (_connectionLock) DisconnectCore();
         }
 

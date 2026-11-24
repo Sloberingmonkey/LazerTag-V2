@@ -48,17 +48,14 @@ public sealed class DebriefRegressionTests
         sent.Clear();
         for (int i = 0; i < 2; i++) { MakeDebriefRequestDue(host); host.Update(); }
         Assert.Equal(!complete, host.Players.Last().Dropped);
-        if (complete)
+        // Complete and forced finishes both rank the players and send the ranks to the taggers.
+        Assert.All(host.Players, p => Assert.Equal(1, p.Rank)); // tied at zero
+        Assert.Equal(2, sent.Count);
+        Assert.All(sent, packet =>
         {
-            Assert.All(host.Players, p => Assert.Equal(1, p.Rank)); // tied at zero
-            Assert.Equal(2, sent.Count);
-            Assert.All(sent, packet =>
-            {
-                Assert.Equal(PacketType.RankReport, packet.Type);
-                Assert.Equal(1, packet.Data[2].Data);
-            });
-        }
-        else Assert.Empty(sent);
+            Assert.Equal(PacketType.RankReport, packet.Type);
+            Assert.Equal(1, packet.Data[2].Data);
+        });
     }
 
     [Fact]

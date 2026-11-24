@@ -126,6 +126,19 @@ public sealed class GameController : ControllerBase
             : Conflict(new { Error = "This game is no longer waiting for reports." });
     }
 
+    [HttpPost("{gameId:guid}/players/{taggerId:int}/remove")]
+    [OperatorAuthorize]
+    [EnableRateLimiting("operator-control")]
+    public async Task<IActionResult> RemovePlayer(Guid gameId, int taggerId)
+    {
+        if (taggerId is < 0 or > 255)
+            return BadRequest(new { Error = "Tagger ID must be between 0 and 255." });
+        bool removed = await _service.RemoveLobbyPlayerAsync(gameId, (byte)taggerId);
+        return removed
+            ? Ok(new { Success = true })
+            : Conflict(new { Error = "Players can only be removed from the lobby, before the countdown starts." });
+    }
+
     [HttpPost("next")]
     [OperatorAuthorize]
     [EnableRateLimiting("operator-control")]

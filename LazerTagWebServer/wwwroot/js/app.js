@@ -1076,7 +1076,7 @@ function buildPlayerSlots(rows) {
             <div class="override-grid">
               ${overrideNumberField(slot, 'hp', 'HP', 1, 254, saved.hp)}
               ${overrideNumberField(slot, 'shields', 'Shields', 0, 254, saved.shields)}
-              ${overrideNumberField(slot, 'reloads', 'Reloads', 0, 99, saved.reloads)}
+              ${overrideNumberField(slot, 'reloads', 'Reloads', 0, 99, saved.reloads, '0 = ∞')}
               ${overrideNumberField(slot, 'ammo', 'Ammo', 0, 254, saved.ammo)}
               ${overrideNumberField(slot, 'sleep', 'Sleep', 0, 99, saved.sleepTimeout)}
             </div>
@@ -1100,9 +1100,10 @@ function buildPlayerSlots(rows) {
     updateOverview();
 }
 
-function overrideNumberField(slot, className, label, min, max, value) {
+function overrideNumberField(slot, className, label, min, max, value, hint = '') {
     const safeValue = value === null || value === undefined ? '' : value;
-    return `<label>${label}
+    const hintLabel = hint ? ` <span class="muted-label">${esc(hint)}</span>` : '';
+    return `<label>${label}${hintLabel}
       <input type="number" class="p-${className}" min="${min}" max="${max}"
              inputmode="numeric" placeholder="Global" value="${esc(safeValue)}"
              aria-label="Player ${slot} ${label} override">
@@ -1383,6 +1384,19 @@ async function nextStep() {
     });
 }
 
+async function removeLobbyPlayer(taggerId) {
+    const snapshot = currentSnapshot;
+    if (!snapshot?.gameId || !isStateSnapshotFresh() || !isLobbyState(snapshot.hostingState)) return;
+    const player = snapshot.players?.find(item => Number(item.taggerId) === Number(taggerId));
+    if (!player) return;
+    const name = player.name || player.id || 'this tagger';
+    if (!window.confirm(`Remove ${name} from the lobby? Their seat opens again so the tagger can rejoin.`)) return;
+    await runAction(`btn-remove-${taggerId}`,
+        `/api/game/${encodeURIComponent(snapshot.gameId)}/players/${encodeURIComponent(taggerId)}/remove`, {
+            successMessage: `${name} removed. Turn the tagger on again to rejoin.`,
+        });
+}
+
 async function runAction(buttonId, url, { body = null, successMessage = '' } = {}) {
     if (!operatorAuthenticated) {
         showLoginDialog();
@@ -1582,8 +1596,9 @@ function applyState(snapshot, generation) {
         snapshot.gameMinutes || 0,
         snapshot.countdownSeconds || 0,
         snapshot.isTeamGame ? 1 : 0,
+        operatorAuthenticated ? 1 : 0,
         ...players.map(player => [
-            player.id, player.name, player.team || 0, player.confirmed ? 1 : 0,
+            player.id, player.name, player.team || 0, player.confirmed ? 1 : 0, player.taggerId ?? '',
             player.hitsScored || 0, player.hitsTaken || 0, player.allDebriefed ? 1 : 0,
         ].join(':')),
     ].join('|');
@@ -1634,13 +1649,20 @@ function applyState(snapshot, generation) {
         const status = state === 'summary'
             ? (player.allDebriefed ? '✓ Reported' : 'Awaiting report')
             : (player.confirmed ? '✓ Ready' : 'Joining…');
+        // A power-cycled tagger can come back with a new ID; removing its old entry frees the seat.
+        const taggerId = Number(player.taggerId);
+        const removeButton = operatorAuthenticated && isLobbyState(state) && Number.isInteger(taggerId)
+            ? ` <button type="button" class="pill-btn live-remove-btn" id="btn-remove-${taggerId}"
+                  onclick="removeLobbyPlayer(${taggerId})"
+                  aria-label="Remove ${esc(player.name || identifier)} from the lobby">Remove</button>`
+            : '';
         return `<article class="live-player${player.confirmed ? ' is-confirmed' : ''}">
           <span class="live-player-id">${esc(identifier)}</span>
           <span class="live-player-name">
             <strong>${esc(player.name || identifier)}</strong>
             <span>${esc(details)}</span>
           </span>
-          <span class="live-player-status">${status}</span>
+          <span class="live-player-status">${status}${removeButton}</span>
         </article>`;
     }).join('');
 }

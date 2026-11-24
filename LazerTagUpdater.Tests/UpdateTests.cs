@@ -137,7 +137,11 @@ public class UpdateTests
         try
         {
             string release = Path.Combine(directory.FullName, "release.tar.gz");
-            Assert.Null(PiUpdate.ReadCompanionHelper(release));
+            // Without an adjacent copy, the built-in release checker is still installed.
+            string builtIn = Encoding.UTF8.GetString(PiUpdate.ReadCompanionHelper(release));
+            Assert.Contains("lazertag-deploy", builtIn);
+            File.WriteAllText(Path.Combine(directory.FullName, PiUpdate.HelperFileName), builtIn);
+            Assert.Equal(builtIn, Encoding.UTF8.GetString(PiUpdate.ReadCompanionHelper(release)));
             File.WriteAllText(Path.Combine(directory.FullName, PiUpdate.HelperFileName), "different version");
             Assert.Throws<InvalidDataException>(() => PiUpdate.ReadCompanionHelper(release));
         }
